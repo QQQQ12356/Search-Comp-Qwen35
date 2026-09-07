@@ -1,0 +1,32 @@
+# Qwen3.5 Beacon 训练 —— 使用 Search-R1 官方 SFT 轨迹（messages 格式）
+# 训练数据：/home/huangzj/proj/searchagent/Search-R1-SFT-jsonl/qwen3-4b-instruct-sft.jsonl
+# 只压缩 <information> 检索文档块，损失只在 assistant 生成片段上计算。
+# LoRA 微调：冻结基础模型，只训练低秩适配器 + beacon 参数，降低显存开销。
+model_name_or_path: "Qwen/Qwen3.5-2B"
+data_mode: "searchr1"
+train_data_path: "/home/huangzj/proj/searchagent/Search-R1-SFT-jsonl/qwen3-4b-instruct-sft.jsonl"
+max_length: 2048
+learning_rate: 5.0e-5
+weight_decay: 0.01
+num_epochs: 1
+grad_accum_steps: 8
+save_freq_steps: 200
+seed: 42
+exp_name: "beacon_qwen3_searchr1_v1"
+output_dir: "outputs"
+# LoRA 配置（use_lora: true 时生效）
+use_lora: true
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+# 梯度检查点（降低激活显存，linear_attention 层尤其关键）
+gradient_checkpointing: true
+beacon:
+  enable_beacon: true
+  beacon_window: 512
+  beacon_stride: 512
+  beacon_ratio: 32
+  beacon_param: "q k v"
+  beacon_embed_init: "eos"
+  beacon_pos: "append"
+  beacon_attn: "full-coverage"

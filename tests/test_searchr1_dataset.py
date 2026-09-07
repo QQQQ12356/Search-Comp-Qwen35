@@ -1,0 +1,68 @@
+"""Search-R1 messages 格式数据集的单元测试（Qwen3.5 tokenizer）。
+
+覆盖：messages → input_ids/labels/regions 的映射，特别是
+- Qwen3.5 多模态 chat 模板对 [system] 前缀的增量编码修复；
+- ``<information>`` 文档块 → 压缩区（labels=-100）；
+- assistant 片段 → 有监督（labels=自身 id）。
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import pytest
+
+from search_comp.data.searchr1_dataset import SearchR1Collator, SearchR1SFTDataset
+
+
+def _write_sample(path):
+    msgs = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Answer the question. Question: Who founded Google?"},
+        {"role": "assistant", "content": "<thinking>\nI need to search.\n</thinking>\n<search>Google founders</search>"},
+        {"role": "user", "content": "<information>[Document 1] Google was founded by Larry Page and Sergey Brin.</information>"},
+        {"role": "assistant", "content": "<thinking>\nNow I know.\n</thinking>\n<answer> Larry Page and Sergey Brin </answer>"},
+    ]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"messages": msgs}) + "\n")
+
+
+@pytest.fixture(scope="module")
+def tokenizer():
+    from search_comp.milestones.qwen35_native import load_tokenizer
+
+    tok = load_tokenizer("Qwen/Qwen3.5-2B")
+    tok.pad_token = tok.eos_token
+    return tok
+
+
+def test_searchr1_dataset_regions_and_labels(tokenizer, tmp_path):
+    data = tmp_path / "sft.jsonl"
+    _write_sample(str(data))
+    ds = SearchR1SFTDataset(str(data), tokenizer, max_length=4096)
+    assert len(ds) == 1
+    s = ds[0]
+
+    # 至少一个 <information> 压缩区
+    assert len(s["regions"]) >= 1
+    for rs, re in s["regions"]:
+        assert rs < re <= len(s["input_ids"])
+        # 压缩区应覆盖 <information> 文档块内容（< 可能跨 token 边界，故断言文档正文）
+        region_text = tokenizer.decode(s["input_ids"][rs:re])
+        assert "information" in region_text and "Document 1" in region_text
+        # 压缩区内标签均为 -100（文档不计损失）
+        assert all(l == -100 for l in s["labels"][rs:re])
+
+    # 有监督 token（assistant 生成片段）存在
+    sup = [i for i, l in enumerate(s["labels"]) if l != -100]
+    assert len(sup) > 0
+    # 两个 assistant 消息
+    assert s["n_turns"] == 2
+    assert s["n_searches"] == 1
+
+
+def test_collator_bs1_only(tokenizer):
+    with pytest.raises(ValueError):
+        SearchR1Collator(tokenizer)([{}, {}])

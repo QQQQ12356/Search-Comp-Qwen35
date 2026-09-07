@@ -1,0 +1,21 @@
+# Qwen3.5 Beacon 搜索轨迹 SFT（只压缩检索内容，损失不含检索内容）
+model_name_or_path: "Qwen/Qwen3.5-2B"
+train_data_path: "outputs/data/hotpotqa_train_interactive.jsonl"
+max_length: 8192
+learning_rate: 5.0e-5
+weight_decay: 0.01
+num_epochs: 1
+grad_accum_steps: 8
+save_freq_steps: 200
+seed: 42
+exp_name: "beacon_qwen3_sft_v1"
+output_dir: "outputs"
+beacon:
+  enable_beacon: true
+  beacon_window: 256
+  beacon_stride: 256
+  beacon_ratio: 32
+  beacon_param: "q k v"
+  beacon_embed_init: "eos"
+  beacon_pos: "append"
+  beacon_attn: "full-coverage"

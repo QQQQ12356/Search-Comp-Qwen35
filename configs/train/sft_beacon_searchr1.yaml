@@ -1,0 +1,55 @@
+# =============================================================================
+# Beacon RAG SFT 训练配置（Search-R1 SFT-jsonl，messages 格式）
+# =============================================================================
+# 训练数据来自 Search-R1 的现成 SFT 轨迹，**不再**用规则生成：
+#   /home/huangzj/proj/searchagent/Search-R1-SFT-jsonl/qwen2.5-7b-instruct-sft.jsonl
+# 每行 {messages:[{role,content},...]}，含多轮 think→<search>→<information>→answer。
+# 每个 <information> 用户消息块是独立的 beacon 压缩区；loss 只算 assistant 输出。
+# 数据模式：searchr1 = 直接解析 messages 轨迹（多压缩区）。
+#
+# 注意：该数据集是 Qwen2.5 系列对齐生成的。base model_name_or_path 应与
+# tokenizer 同族（Qwen2.5 系列都兼容）。默认 1.5B 省显存；若显存充足（如 7B /
+# 长序列建议），可改成 Qwen/Qwen2.5-7B-Instruct。
+model_name_or_path: "Qwen/Qwen2.5-1.5B-Instruct"
+
+# 数据（Search-R1 SFT-jsonl 仅用于训练；评估用 HotpotQA val + 在线 BM25）
+train_data_path: "/home/huangzj/proj/searchagent/Search-R1-SFT-jsonl/qwen2.5-7b-instruct-sft.jsonl"
+val_data_path: null
+max_length: 8192
+#: 数据模式：searchr1 = 直接解析 Search-R1 messages 轨迹
+data_mode: "searchr1"
+
+# 训练超参数（多轮轨迹每样本结构多变，仅支持 bs=1，用梯度累积扩大有效 batch）
+per_device_batch_size: 1
+grad_accum_steps: 8
+learning_rate: 5.0e-5
+weight_decay: 0.01
+num_epochs: 1
+warmup_ratio: 0.05
+max_steps: null
+
+# 模型
+freeze_llm: false
+gradient_checkpointing: true
+use_bf16: true
+
+# 日志与保存
+exp_name: "beacon_sft_searchr1_v1"
+output_dir: "outputs"
+save_freq_steps: 500
+log_freq_steps: 5
+seed: 42
+
+# =============================================================================
+# Beacon 压缩超参数（Search-R1 文档块通常比 HotpotQA 交互数据短/长不定；
+# 用中等窗口 + 高压缩比。可按需调整）
+# =============================================================================
+beacon:
+  enable_beacon: true
+  beacon_window: 512
+  beacon_stride: 512
+  beacon_ratio: 32
+  beacon_param: "q k v"
+  beacon_embed_init: "eos"
+  beacon_pos: "append"
+  beacon_attn: "full-coverage"

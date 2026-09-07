@@ -1,0 +1,48 @@
+# =============================================================================
+# Beacon RAG SFT 训练配置（交互式搜索 v1）
+# =============================================================================
+# 贴近 Search-R1 原文的交互式搜索：模型生成 <think> → <search> → 观察
+# <information> → 再推理 → <answer>。每个 <information> 文档块是独立的
+# beacon 压缩区，原始文档 K/V 不参与后续解码。
+model_name_or_path: "Qwen/Qwen2.5-1.5B-Instruct"
+
+# 数据
+train_data_path: "outputs/data/hotpotqa_train_interactive.jsonl"
+val_data_path: "outputs/data/hotpotqa_val_interactive.jsonl"
+max_length: 8192
+#: 数据模式：interactive = 交互式多轮搜索（多压缩区），single = 单轮 RAG
+data_mode: "interactive"
+
+# 训练超参数（交互式数据每样本结构多变，仅支持 bs=1，用梯度累积扩大有效 batch）
+per_device_batch_size: 1
+grad_accum_steps: 8
+learning_rate: 5.0e-5
+weight_decay: 0.01
+num_epochs: 1
+warmup_ratio: 0.05
+max_steps: null
+
+# 模型
+freeze_llm: false
+gradient_checkpointing: true
+use_bf16: true
+
+# 日志与保存
+exp_name: "beacon_sft_interactive_v1"
+output_dir: "outputs"
+save_freq_steps: 200
+log_freq_steps: 5
+seed: 42
+
+# =============================================================================
+# Beacon 压缩超参数（交互式文档块较小，用小窗口 + 高压缩比）
+# =============================================================================
+beacon:
+  enable_beacon: true
+  beacon_window: 256
+  beacon_stride: 256
+  beacon_ratio: 32
+  beacon_param: "q k v"
+  beacon_embed_init: "eos"
+  beacon_pos: "append"
+  beacon_attn: "full-coverage"
