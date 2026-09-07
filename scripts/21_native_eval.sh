@@ -4,6 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export TOKENIZERS_PARALLELISM=false
 ENV=${CONDA_ENV:-search-comp-qwen3.5}
+# 直接用该 conda 环境 python（避免 conda run 的子进程与输出缓冲，保证实时进度）
+PYTHON=${PYTHON:-"$(conda info --base)/envs/${ENV}/bin/python"}
+[ -x "$PYTHON" ] || PYTHON=python
 
 MODEL_PATH=${1:-outputs/models/native_qwen3_sft_v1/final}
 RESULT_PATH=${2:-outputs/results/native_qwen3_sft_v1/predictions.jsonl}
@@ -20,7 +23,7 @@ if [ "$DO_SAMPLE" = "1" ]; then SAMPLE_FLAG="--do_sample --temperature 0.8"; fi
 
 # shellcheck disable=SC2086
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
-    conda run -n "$ENV" python -m search_comp.evaluation.native_interactive_eval \
+    "$PYTHON" -u -m search_comp.evaluation.native_interactive_eval \
     --model_path "$MODEL_PATH" \
     --corpus_path "$CORPUS" \
     --output_path "$RESULT_PATH" \

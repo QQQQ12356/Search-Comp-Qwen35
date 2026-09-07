@@ -27,6 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from transformers import DynamicCache
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5Attention,
     Qwen3_5ForCausalLM,
@@ -431,14 +432,20 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
 
     # ------------------------------------------------------------------
     def forward(self, input_ids=None, attention_mask=None, labels=None,
-                compress_regions=None, compress_start=None, compress_end=None, **kwargs):
+                compress_regions=None, compress_start=None, compress_end=None,
+                regions=None, **kwargs):
         if not self.beacon_config.enable_beacon:
             return super().forward(input_ids=input_ids, attention_mask=attention_mask, labels=labels, **kwargs)
         if compress_regions is None and compress_start is not None and compress_end is not None:
             compress_regions = [(int(compress_start), int(compress_end))]
         if compress_regions is None:
+            # collator 返回的 batch 键名可能是 regions（Trainer 经 remove_unused_columns=False 透传）
+            compress_regions = regions
+        if compress_regions is None:
             raise ValueError("beacon 模式必须提供 compress_regions 或 compress_start/compress_end")
-        return self._beacon_forward(input_ids, labels, compress_regions)
+        loss, logits = self._beacon_forward(input_ids, labels, compress_regions)
+        # 返回 ModelOutput，兼容 transformers.Trainer（取 outputs["loss"]）
+        return CausalLMOutputWithPast(loss=loss, logits=logits)
 
     # ------------------------------------------------------------------
     def _embed(self, input_ids, beacon_size):
@@ -513,13 +520,15 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         self._mem = _Qwen3BeaconMemory(self, self.beacon_config)
         self._mem.prepare(input_ids, labels, regions)
 
+        last_logits = None
         while not self._mem.finish:
             win_ids, win_labels, attn_mask, position_embeddings, past = self._mem.step()
             new_past, _logits = self._native_forward(win_ids, win_labels, attn_mask, position_embeddings, past)
+            last_logits = _logits
             self._mem.update_memory(new_past)
 
         loss = self._mem.output()
-        return loss, loss
+        return loss, last_logits
 
     # ------------------------------------------------------------------
     # 生成 / 推理
@@ -655,7 +664,29 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
 
 def load_beacon_qwen3_5(model_name_or_path, beacon_config=None,
                         torch_dtype=torch.bfloat16, device_map="auto"):
-    """从头 checkpoint 装载 BeaconQwen3_5ForCausalLM（文本主干权重）。"""
+    """装载 BeaconQwen3_5ForCausalLM。
+
+    两种输入形态：
+    1. ``architectures`` 含 ``BeaconQwen3_5ForCausalLM``（如训练后 ``_save_model`` 保存的
+       checkpoint）：直接 ``from_pretrained`` 加载，保留训练好的 beacon 压缩参数。
+    2. 原始 HF 多维包装器（``Qwen3_5ForConditionalGeneration``）：提取文本主干权重后构建，
+       beacon 参数按配置重新初始化。
+    """
+    from transformers import AutoConfig
+
+    cfg = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
+    if "BeaconQwen3_5ForCausalLM" in (cfg.architectures or []):
+        model = BeaconQwen3_5ForCausalLM.from_pretrained(
+            model_name_or_path, torch_dtype=torch_dtype, device_map="cpu"
+        )
+        if beacon_config is not None:
+            model.set_beacon_config(beacon_config)
+        if device_map == "auto":
+            model = model.to("cuda" if torch.cuda.is_available() else "cpu")
+        model = model.to(torch_dtype)
+        model.eval()
+        return model
+
     from ..milestones.qwen35_text import load_text_causal_model
 
     base = load_text_causal_model(model_name_or_path, torch_dtype=torch_dtype, device_map="cpu")

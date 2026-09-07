@@ -20,6 +20,7 @@ import os
 from typing import Any, Dict, List
 
 import torch
+from tqdm import tqdm
 
 from ..data.build_sft_data import truncate_docs_by_tokens
 from ..data.retrieval import BM25Retriever, format_docs_as_reference
@@ -113,16 +114,16 @@ def main() -> None:
     if args.max_questions:
         hp = hp.select(range(args.max_questions))
 
-    print(f"[beacon-eval] {len(hp)} 题 ...")
+    print(f"[beacon-eval] {len(hp)} 题 ...", flush=True)
     results = []
-    for i, ex in enumerate(hp):
+    pbar = tqdm(hp, desc="eval", ncols=100)
+    for i, ex in enumerate(pbar):
         r = run_beacon_agent(model, tokenizer, retriever, ex["question"],
                              max_turns=args.max_turns, topk=args.topk,
                              max_docs_tokens=args.max_docs_tokens)
         r["id"] = str(ex["id"]); r["ground_truth"] = str(ex["answer"]).strip()
         results.append(r)
-        if (i + 1) % 10 == 0 or i == len(hp) - 1:
-            print(f"  {i+1}/{len(hp)}  turns={r['turns']} pred={r['prediction'][:30]!r}")
+        pbar.set_postfix(turns=r["turns"], pred=r["prediction"][:30])
 
     with open(args.output_path, "w", encoding="utf-8") as f:
         for r in results:
