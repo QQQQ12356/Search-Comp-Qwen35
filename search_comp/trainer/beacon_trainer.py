@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import torch
 from transformers import Trainer, TrainerCallback, TrainingArguments
@@ -28,20 +31,82 @@ from transformers import Trainer, TrainerCallback, TrainingArguments
 from ..data.interactive_dataset import InteractiveCollator, InteractiveSFTDataset
 from ..models.beacon_config import BeaconConfig
 from ..milestones.qwen35_text import load_text_tokenizer
+from ..utils.runtime import (
+    count_parameters,
+    load_yaml_config,
+    prepare_run_artifacts,
+    require_keys,
+    resolve_experiment_dir,
+    write_json,
+)
+from ..utils.trainer_callbacks import JsonlMetricsCallback
+
+
+def _cuda_memory_snapshot() -> dict:
+    if not torch.cuda.is_available():
+        return {"cuda_available": False}
+    device = torch.cuda.current_device()
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    return {
+        "cuda_available": True,
+        "device": device,
+        "device_name": torch.cuda.get_device_name(device),
+        "free_bytes": free_bytes,
+        "total_bytes": total_bytes,
+        "allocated_bytes": torch.cuda.memory_allocated(device),
+        "reserved_bytes": torch.cuda.memory_reserved(device),
+        "max_allocated_bytes": torch.cuda.max_memory_allocated(device),
+        "max_reserved_bytes": torch.cuda.max_memory_reserved(device),
+    }
+
+
+def _sample_length_summary(dataset, sample_size: int, seed: int) -> dict:
+    sample_size = min(max(sample_size, 0), len(dataset))
+    if sample_size == 0:
+        return {"sampled": 0}
+    generator = torch.Generator().manual_seed(seed)
+    indices = torch.randperm(len(dataset), generator=generator)[:sample_size].tolist()
+    lengths = []
+    supervised = []
+    information = []
+    for index in indices:
+        item = dataset[index]
+        lengths.append(len(item["input_ids"]))
+        supervised.append(sum(label != -100 for label in item["labels"]))
+        information.append(sum(end - start for start, end in item.get("regions", [])))
+
+    def percentile(values, fraction):
+        ordered = sorted(values)
+        position = min(len(ordered) - 1, int((len(ordered) - 1) * fraction))
+        return ordered[position]
+
+    return {
+        "sampled": sample_size,
+        "tokens": {
+            "min": min(lengths), "p50": percentile(lengths, 0.50),
+            "p95": percentile(lengths, 0.95), "p99": percentile(lengths, 0.99),
+            "max": max(lengths),
+        },
+        "supervised_tokens": {
+            "p50": percentile(supervised, 0.50),
+            "p95": percentile(supervised, 0.95), "max": max(supervised),
+        },
+        "information_tokens": {
+            "p50": percentile(information, 0.50),
+            "p95": percentile(information, 0.95), "max": max(information),
+        },
+    }
 
 
 class _SaveBeaconCheckpoints(TrainerCallback):
-    """按步数合并保存模型为标准 Beacon checkpoint（LoRA 需 merge）。
-
-    Trainer 默认 save 只存 LoRA adapter，不能被 ``load_beacon_qwen3_5`` 直接加载，
-    故 ``save_strategy="no"``，由本回调统一合并保存。
+    """按步数保存 LoRA adapter 与 Beacon 参数，不触碰正在训练的模型。
 
     Args:
         exp_dir: 输出目录（``output_dir/models/<exp_name>``）。
         save_freq: 每多少优化器步保存一次。
         model: 训练中的模型（可能是 PEFT 包装）。
         tokenizer: 用于随 checkpoint 保存。
-        use_lora: 是否 LoRA（决定保存前是否 merge）。
+        use_lora: 是否 LoRA。
         max_steps: 按步数训练的终止步数；为 None 时按 epoch 终止。
     """
 
@@ -58,24 +123,27 @@ class _SaveBeaconCheckpoints(TrainerCallback):
         gs = state.global_step
         if gs > 0 and gs % self.save_freq == 0:
             ckpt = os.path.join(self.exp_dir, f"checkpoint-{gs}")
-            _save_model(self.model, self.tokenizer, ckpt, self.use_lora)
-            print(f"[beacon] 已保存 checkpoint -> {ckpt}", flush=True)
+            _save_training_checkpoint(self.model, self.tokenizer, ckpt, self.use_lora)
+            print(f"[beacon] 已保存 adapter/state -> {ckpt}", flush=True)
         if self.max_steps is not None and gs >= self.max_steps:
             control.should_training_stop = True  # 精确在 max_steps 处停止
 
     def on_train_end(self, args, state, control, **kwargs):
-        final_dir = os.path.join(self.exp_dir, "final")
-        _save_model(self.model, self.tokenizer, final_dir, self.use_lora)
-        print(f"[beacon] 训练结束，模型已保存到 {final_dir}", flush=True)
+        final_dir = os.path.join(self.exp_dir, "final_adapter")
+        _save_training_checkpoint(self.model, self.tokenizer, final_dir, self.use_lora)
+        print(f"[beacon] 训练结束，adapter/state 已保存到 {final_dir}", flush=True)
 
 
-def main_train(config_path: str) -> None:
-    import yaml
-
+def main_train(
+    config_path: str,
+    overrides=(),
+) -> None:
     from ..models.beacon_qwen3 import load_beacon_qwen3_5
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_yaml_config(config_path, overrides)
+    require_keys(cfg, ("model_name_or_path", "train_data_path", "output_dir", "exp_name"))
+    exp_dir = str(resolve_experiment_dir(cfg))
+    prepare_run_artifacts(exp_dir, cfg, config_path, overrides)
 
     torch.manual_seed(cfg.get("seed", 42))
 
@@ -85,8 +153,12 @@ def main_train(config_path: str) -> None:
     beacon_cfg = BeaconConfig.from_dict(cfg.get("beacon", {}))
     model = load_beacon_qwen3_5(cfg["model_name_or_path"], beacon_config=beacon_cfg)
     model.train()
-    # 梯度检查点：降低激活显存（对 linear_attention 层的 O(seq) 中间量尤其关键）
-    model._use_gradient_checkpointing = cfg.get("gradient_checkpointing", True)
+    if cfg.get("gradient_checkpointing", False):
+        print(
+            "[beacon] 警告：混合 Beacon 使用显式跨窗状态，当前不启用 Trainer 的层级重计算；"
+            "该配置仅保留在运行记录中。",
+            flush=True,
+        )
 
     # 可选 LoRA：冻结基础模型，仅在注意力/MLP 投影上训练低秩适配器，
     # beacon 参数保持全量可训练。显著降低优化器/梯度显存（约 -10GB）。
@@ -127,45 +199,39 @@ def main_train(config_path: str) -> None:
         from ..data.searchr1_dataset import SearchR1Collator, SearchR1SFTDataset
 
         train_ds = SearchR1SFTDataset(
-            cfg["train_data_path"], tokenizer, max_length=cfg.get("max_length", 8192)
+            cfg["train_data_path"], tokenizer
         )
         collator = SearchR1Collator(tokenizer)  # bs=1
+        eval_ds = (
+            SearchR1SFTDataset(cfg["val_data_path"], tokenizer)
+            if cfg.get("val_data_path") else None
+        )
         print(f"[beacon] data_mode=searchr1，{len(train_ds)} 条 Search-R1 SFT 轨迹", flush=True)
     else:
         train_ds = InteractiveSFTDataset(
             cfg["train_data_path"], tokenizer, max_length=cfg.get("max_length", 8192)
         )
         collator = InteractiveCollator(tokenizer)  # bs=1
+        eval_ds = (
+            InteractiveSFTDataset(
+                cfg["val_data_path"], tokenizer, max_length=cfg.get("max_length", 8192)
+            )
+            if cfg.get("val_data_path") else None
+        )
         print(f"[beacon] data_mode=interactive，{len(train_ds)} 条交互式轨迹", flush=True)
 
-    trainable = [p for p in model.parameters() if p.requires_grad]
-    n_train = sum(p.numel() for p in trainable)
+    parameter_stats = count_parameters(model)
+    n_train = parameter_stats["trainable_parameters"]
     print(
         f"[beacon] 可训练参数 {n_train/1e6:.2f}M / 总 "
         f"{sum(p.numel() for p in model.parameters())/1e6:.1f}M",
         flush=True,
     )
 
-    # 24GB 单卡：优先 8-bit Adam 控制优化器显存（回退普通 AdamW）
-    try:
-        import bitsandbytes as bnb
-
-        optimizer = bnb.optim.AdamW8bit(
-            trainable, lr=cfg.get("learning_rate", 5e-5), weight_decay=cfg.get("weight_decay", 0.01)
-        )
-        print("[beacon] 使用 8-bit AdamW 优化器", flush=True)
-    except ImportError:
-        optimizer = torch.optim.AdamW(
-            trainable, lr=cfg.get("learning_rate", 5e-5), weight_decay=cfg.get("weight_decay", 0.01)
-        )
-
     grad_accum = cfg.get("grad_accum_steps", 8)
     save_freq = cfg.get("save_freq_steps", 200)
     logging_steps = cfg.get("logging_steps", 5)
     max_train_steps = cfg.get("max_train_steps", None)
-
-    exp_dir = os.path.join(cfg["output_dir"], "models", cfg["exp_name"])
-    os.makedirs(exp_dir, exist_ok=True)
 
     if max_train_steps is not None:
         max_train_steps = int(max_train_steps)
@@ -185,54 +251,134 @@ def main_train(config_path: str) -> None:
         max_steps=max_train_steps if max_train_steps is not None else -1,
         num_train_epochs=cfg.get("num_epochs", 1),
         logging_steps=logging_steps,
+        logging_first_step=True,
+        include_num_input_tokens_seen=True,
         log_level="info",
-        save_strategy="no",                     # 由 _SaveBeaconCheckpoints 合并保存
+        save_strategy="no",                     # 由 _SaveBeaconCheckpoints 保存 adapter/state
         report_to=[],                            # 不写 wandb/tensorboard
         remove_unused_columns=False,             # 保留 collator 的 regions 透传给 forward
         seed=cfg.get("seed", 42),
         disable_tqdm=False,                      # 实时进度条
         fp16=False,
-        bf16=False,                              # 参数本身为 bf16，交由 GPU 原生计算
+        bf16=cfg.get("use_bf16", True),
+        optim=cfg.get("optim", "adamw_torch"),
+        lr_scheduler_type=cfg.get("lr_scheduler_type", "constant"),
+        warmup_steps=cfg.get("warmup_steps", 0),
+        max_grad_norm=cfg.get("max_grad_norm", 1.0),
         dataloader_num_workers=0,
         dataloader_pin_memory=False,
+        eval_strategy="steps" if eval_ds is not None else "no",
+        eval_steps=cfg.get("eval_steps", save_freq),
+        per_device_eval_batch_size=1,
+        prediction_loss_only=True,
+        run_name=cfg["exp_name"],
     )
 
-    # 恒定学习率（与原始手写循环一致）；显式传入使 Trainer 不再自建调度器
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
     trainer = Trainer(
         model=model,
         args=args,
         train_dataset=train_ds,
+        eval_dataset=eval_ds,
         data_collator=collator,
-        optimizers=(optimizer, lr_scheduler),
         callbacks=[
-            _SaveBeaconCheckpoints(exp_dir, save_freq, model, tokenizer, use_lora, max_train_steps)
+            _SaveBeaconCheckpoints(exp_dir, save_freq, model, tokenizer, use_lora, max_train_steps),
+            JsonlMetricsCallback(exp_dir),
         ],
     )
 
     t0 = time.time()
+    length_summary = _sample_length_summary(
+        train_ds,
+        int(cfg.get("length_diagnostics_samples", 256)),
+        int(cfg.get("seed", 42)),
+    )
+    write_json(
+        os.path.join(exp_dir, "dataset_summary.json"),
+        {
+            "data_mode": data_mode,
+            "train_samples": len(train_ds),
+            "eval_samples": len(eval_ds) if eval_ds is not None else 0,
+            "length_diagnostics": length_summary,
+            **parameter_stats,
+        },
+    )
+    print(f"[beacon] 长度抽样统计: {length_summary}", flush=True)
     print("[beacon] 开始训练 ...", flush=True)
-    trainer.train()
+    try:
+        train_result = trainer.train()
+    except torch.OutOfMemoryError as error:
+        failure = {
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "cuda_memory": _cuda_memory_snapshot(),
+            "recommendations": [
+                "减小 beacon.beacon_loss_chunk_size（例如 64 -> 32）",
+                "启用 beacon.beacon_cpu_offload_activations=true",
+                "减小 beacon.beacon_window 或 LoRA rank",
+                "确认 GPU 没有其他进程占用显存",
+            ],
+        }
+        write_json(Path(exp_dir) / "failure.json", failure)
+        print(f"[beacon] CUDA OOM，诊断已保存到 {exp_dir}/failure.json", flush=True)
+        raise
 
+    final_adapter_dir = os.path.join(exp_dir, "final_adapter")
     final_dir = os.path.join(exp_dir, "final")
-    with open(os.path.join(exp_dir, "train_summary.json"), "w", encoding="utf-8") as f:
-        json.dump(
-            {"total_steps": trainer.state.global_step,
-             "elapsed_seconds": round(time.time() - t0, 1)},
-            f, indent=2,
+    if use_lora:
+        _merge_final_adapter_in_subprocess(
+            cfg["model_name_or_path"], final_adapter_dir, final_dir, cfg.get("beacon", {})
         )
+    else:
+        _save_training_checkpoint(model, tokenizer, final_dir, use_lora=False)
+    write_json(
+        os.path.join(exp_dir, "train_summary.json"),
+        {
+            "total_steps": trainer.state.global_step,
+            "elapsed_seconds": round(time.time() - t0, 3),
+            "final_model_path": final_dir,
+            "train_metrics": train_result.metrics,
+            **parameter_stats,
+        },
+    )
     print(f"[beacon] 训练完成，训练步数={trainer.state.global_step}，耗时 {time.time()-t0:.1f}s，"
           f"模型保存到 {final_dir}")
 
 
-def _save_model(model, tokenizer, save_dir: str, use_lora: bool) -> None:
-    """保存模型：LoRA 时先合并权重，存成标准 BeaconQwen3_5ForCausalLM checkpoint。"""
+def _save_training_checkpoint(model, tokenizer, save_dir: str, use_lora: bool) -> None:
+    """保存可恢复的 LoRA adapter 与 Beacon 参数 state dict。"""
+    os.makedirs(save_dir, exist_ok=True)
     if use_lora:
-        merged = model.merge_and_unload()
-        merged.save_pretrained(save_dir)
+        model.save_pretrained(save_dir)
+        beacon_state = {
+            name.removeprefix("base_model.model."): param.detach().cpu()
+            for name, param in model.named_parameters()
+            if "beacon" in name
+        }
+        torch.save(beacon_state, os.path.join(save_dir, "beacon_state.pt"))
     else:
         model.save_pretrained(save_dir)
     tokenizer.save_pretrained(save_dir)
+
+
+def _merge_final_adapter_in_subprocess(
+    base_model_path: str, adapter_path: str, output_path: str, beacon_config: dict
+) -> None:
+    """在独立 Python 进程中加载 adapter 后合并，避免修改 live PeftModel。"""
+    command = [
+        sys.executable,
+        "-m",
+        "search_comp.trainer.merge_beacon_lora",
+        "--base_model_path",
+        base_model_path,
+        "--adapter_path",
+        adapter_path,
+        "--output_path",
+        output_path,
+        "--beacon_config_json",
+        json.dumps(beacon_config),
+    ]
+    print(f"[beacon] 在独立进程合并 final adapter -> {output_path}", flush=True)
+    subprocess.run(command, check=True)
 
 
 if __name__ == "__main__":
@@ -240,5 +386,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Qwen3.5 Beacon 搜索轨迹 SFT")
     parser.add_argument("--config", type=str, required=True)
+    parser.add_argument(
+        "--set", dest="overrides", action="append", default=[],
+        help="覆盖 YAML 参数，可重复，例如 --set beacon.beacon_ratio=32",
+    )
     args = parser.parse_args()
-    main_train(args.config)
+    main_train(args.config, args.overrides)

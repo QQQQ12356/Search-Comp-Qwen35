@@ -2,7 +2,8 @@
 # Beacon RAG SFT 训练配置（Search-R1 SFT-jsonl，messages 格式）
 # =============================================================================
 # 训练数据来自 Search-R1 的现成 SFT 轨迹，**不再**用规则生成：
-#   /home/huangzj/proj/searchagent/Search-R1-SFT-jsonl/qwen2.5-7b-instruct-sft.jsonl
+#   outputs/data/searchr1/qwen2.5-7b-instruct-sft.jsonl
+# 该文件不在仓库内，获取方式见 configs/train/beacon_qwen3.5_searchr1.yaml 顶部注释。
 # 每行 {messages:[{role,content},...]}，含多轮 think→<search>→<information>→answer。
 # 每个 <information> 用户消息块是独立的 beacon 压缩区；loss 只算 assistant 输出。
 # 数据模式：searchr1 = 直接解析 messages 轨迹（多压缩区）。
@@ -13,7 +14,7 @@
 model_name_or_path: "Qwen/Qwen2.5-1.5B-Instruct"
 
 # 数据（Search-R1 SFT-jsonl 仅用于训练；评估用 HotpotQA val + 在线 BM25）
-train_data_path: "/home/huangzj/proj/searchagent/Search-R1-SFT-jsonl/qwen2.5-7b-instruct-sft.jsonl"
+train_data_path: "outputs/data/searchr1/qwen2.5-7b-instruct-sft.jsonl"
 val_data_path: null
 max_length: 8192
 #: 数据模式：searchr1 = 直接解析 Search-R1 messages 轨迹

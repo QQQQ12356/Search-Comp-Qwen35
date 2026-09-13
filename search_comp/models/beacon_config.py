@@ -44,8 +44,18 @@ class BeaconConfig:
     beacon_attend_prev: bool = True
     #: beacon 放置方式。仅支持 "append"（beacon 追加在窗口末尾）
     beacon_pos: str = "append"
-    #: 生成 / 推理时使用的压缩率（覆盖训练时的 beacon_ratio）
+    #: 保留兼容字段；当前 Qwen3.5 窗口状态机统一使用 beacon_ratio
     eval_beacon_ratio: Optional[int] = None
+    #: 线性注意力层的 Beacon-only 状态写入器秩
+    beacon_linear_writer_rank: int = 128
+    #: 训练 loss 的有效 token 分块大小；避免一次生成超大词表 logits
+    beacon_loss_chunk_size: int = 64
+    #: loss 分块是否使用 activation checkpoint，在反向时重算 LM head
+    beacon_checkpoint_loss: bool = True
+    #: 训练时把 autograd 保存的激活卸载到 CPU，显著省显存但降低速度
+    beacon_cpu_offload_activations: bool = False
+    #: 启用 CPU offload 时的最小输入长度；0 表示所有样本都启用
+    beacon_cpu_offload_threshold: int = 0
 
     def __post_init__(self) -> None:
         """校验参数合法性。"""
@@ -56,6 +66,18 @@ class BeaconConfig:
             assert (
                 self.beacon_ratio > 0
             ), f"beacon_ratio 必须为正数，当前为 {self.beacon_ratio}"
+            assert self.beacon_linear_writer_rank > 0, (
+                "beacon_linear_writer_rank 必须为正数，当前为 "
+                f"{self.beacon_linear_writer_rank}"
+            )
+            assert self.beacon_loss_chunk_size > 0, (
+                "beacon_loss_chunk_size 必须为正数，当前为 "
+                f"{self.beacon_loss_chunk_size}"
+            )
+            assert self.beacon_cpu_offload_threshold >= 0, (
+                "beacon_cpu_offload_threshold 不能为负数，当前为 "
+                f"{self.beacon_cpu_offload_threshold}"
+            )
             assert (
                 self.beacon_window % self.beacon_ratio == 0
             ), f"beacon_window({self.beacon_window}) 必须能被 beacon_ratio({self.beacon_ratio}) 整除"

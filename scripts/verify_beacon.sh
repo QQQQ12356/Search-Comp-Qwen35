@@ -3,12 +3,12 @@
 # 1) 空压缩区（all-keep）的 beacon 前向应与原生前向等价；
 # 2) 压缩只作用于检索内容：文档 K/V 被丢弃、只保留 beacon，损失不含文档。
 set -euo pipefail
-cd "$(dirname "$0")/.."
-export TOKENIZERS_PARALLELISM=false
-ENV=${CONDA_ENV:-search-comp-qwen3.5}
+source "$(dirname "$0")/common.sh"
+PYTHON_BIN=$(resolve_python)
+LOG_PATH=${LOG_PATH:-$(new_log_path verify_beacon)}
 
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} PYTHONPATH="$PWD" \
-  conda run -n "$ENV" python - <<'PY'
+run_logged "$LOG_PATH" env CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} PYTHONPATH="$PWD" \
+  "$PYTHON_BIN" -u - <<'PY'
 import torch
 from search_comp.models.beacon_qwen3 import load_beacon_qwen3_5
 from search_comp.models.beacon_config import BeaconConfig
@@ -32,6 +32,12 @@ assert diff < 0.05, "all-keep 应与原生等价"
 q = tok("Who founded Google?", add_special_tokens=False).input_ids
 doc = tok("Google was founded in 1998 by Larry Page and Sergey Brin while PhD students at Stanford University.", add_special_tokens=False).input_ids
 ans = tok("Larry Page and Sergey Brin", add_special_tokens=False).input_ids
+prefix = torch.tensor([q + doc], device=m.device)
+m.prefill_and_get_cache(prefix, regions=[(len(q), len(q) + len(doc))])
+assert not hasattr(m._mem, "_linear_cache"), "压缩边界不得保留原始 DynamicCache"
+assert not m._mem._linear_conv, "压缩边界不得保留 information 的卷积尾状态"
+assert m._mem._linear_recurrent, "线性层应提交 Beacon writer recurrent state"
+
 ids2 = torch.tensor([q + doc + ans], device=m.device)
 lab2 = torch.full_like(ids2, -100); lab2[:, len(q)+len(doc):] = ids2[:, len(q)+len(doc):]
 loss, _ = m(input_ids=ids2, labels=lab2, compress_start=len(q), compress_end=len(q)+len(doc))

@@ -4,7 +4,7 @@
 Search-R1 风格的检索 Agent，验证基础大模型是否支持检索行为（自生成
 ``<search>query</search>`` → 观察 ``<information>`` → 再推理 → ``<answer>``）：
 
-1. 用 SEARCH_INSTRUCTION 模板构造 user 消息（chat 模板 + generation prompt）。
+1. 将 SEARCH_INSTRUCTION 放入 system，首个 user 消息只保留问题文本。
 2. 逐 token 自回归解码，遇到 ``</search>`` 或 ``</answer>`` 即停止本轮。
 3. 若本轮输出含 ``<search>``，提取 query，BM25 在线检索 top-k 文档。
 4. 把 ``<information>`` 文档块追加到上下文（token 区间记为压缩区）。
@@ -28,7 +28,6 @@ from ..data.retrieval import BM25Retriever, format_docs_as_reference
 from ..data.trajectory import (
     INFO_PREFIX,
     INFO_SUFFIX,
-    SEARCH_INSTRUCTION,
     build_search_chat_prompt,
     extract_search_query,
 )

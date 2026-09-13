@@ -10,12 +10,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 
 import torch
+from tqdm import tqdm
 
 from ..data.retrieval import BM25Retriever
 from ..milestones.searchagent_probe import decode_until, run_searchagent_probe
-from .em_f1 import compute_metrics
+from .statistics import summarize_results
+from ..utils.runtime import append_jsonl, write_json
 
 
 def main() -> None:
@@ -31,6 +34,10 @@ def main() -> None:
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="保留已有 JSONL，并跳过其中已完成的 id",
+    )
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
@@ -56,9 +63,24 @@ def main() -> None:
     if args.max_questions:
         hp = hp.select(range(args.max_questions))
 
-    print(f"\n=== Qwen3.5 原生交互式 SearchAgent 评估（{len(hp)} 题）===")
-    results = []
-    for i, ex in enumerate(hp):
+    completed = {}
+    if args.resume and os.path.exists(args.output_path):
+        with open(args.output_path, "r", encoding="utf-8") as existing_file:
+            for line in existing_file:
+                if line.strip():
+                    row = json.loads(line)
+                    completed[str(row.get("id"))] = row
+    elif os.path.exists(args.output_path):
+        os.remove(args.output_path)
+
+    print(f"\n[native-eval] 总题数={len(hp)} 已完成={len(completed)}", flush=True)
+    results = list(completed.values())
+    progress = tqdm(hp, desc="native-eval", ncols=100)
+    for ex in progress:
+        example_id = str(ex["id"])
+        if example_id in completed:
+            continue
+        started_at = time.time()
         r = run_searchagent_probe(
             model, tokenizer, retriever, str(ex["question"]),
             max_turns=args.max_turns, topk=args.topk,
@@ -66,27 +88,29 @@ def main() -> None:
             do_sample=args.do_sample, temperature=args.temperature,
             verbosity=0,
         )
-        r["id"] = str(ex["id"])
+        r["id"] = example_id
         r["ground_truth"] = str(ex["answer"]).strip()
+        r["latency_seconds"] = round(time.time() - started_at, 4)
+        regions = r.get("regions", [])
+        r["information_tokens"] = sum(end - start for start, end in regions)
+        r["generated_tokens"] = len(
+            tokenizer(str(r.get("output", "")), add_special_tokens=False).input_ids
+        )
         results.append(r)
-        if (i + 1) % 20 == 0 or i == len(hp) - 1:
-            print(f"  已生成 {i + 1}/{len(hp)}")
+        append_jsonl(args.output_path, r)
+        progress.set_postfix(turns=r.get("turns", 0), pred=str(r.get("prediction", ""))[:24])
 
-    with open(args.output_path, "w", encoding="utf-8") as f:
-        for r in results:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-    triples = [(r["id"], r["prediction"], r["ground_truth"]) for r in results if r["ground_truth"]]
-    metrics = compute_metrics(triples)
+    metrics = summarize_results(results)
     metric_path = os.path.splitext(args.output_path)[0] + "_metrics.json"
-    with open(metric_path, "w", encoding="utf-8") as f:
-        json.dump(metrics, f, ensure_ascii=False, indent=2)
+    write_json(metric_path, {**metrics, "evaluation_config": vars(args)})
 
-    n_search = sum(1 for r in results if r["turns"] > 0)
-    n_multi = sum(1 for r in results if r["turns"] > 1)
     print(f"\n=== 结果 ===")
     print(f"EM={metrics['em']:.3f}  F1={metrics['f1']:.3f}  (valid={metrics.get('valid_count')})")
-    print(f"触发搜索: {n_search} ({n_search/max(len(results),1):.0%}) | 多轮搜索(≥2): {n_multi} | 平均轮次 {sum(r['turns'] for r in results)/max(len(results),1):.2f}")
+    print(
+        f"触发搜索: {metrics['search_samples']} ({metrics['search_rate']:.0%}) | "
+        f"多轮搜索(≥2): {metrics['multi_turn_samples']} | "
+        f"平均轮次 {metrics['average_turns']:.2f}"
+    )
     print(f"结果 -> {args.output_path}\n指标 -> {metric_path}")
 
 

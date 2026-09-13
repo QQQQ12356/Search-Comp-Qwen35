@@ -3,14 +3,45 @@
 把 [search-comp](../search-comp)（Search-R1 SFT + Activate Beacon 长上下文压缩）的
 基础大模型从 **Qwen2.5 迁移到 Qwen3.5 系列**。conda 环境：`search-comp-qwen3.5`。
 
+## 文档索引
+
+| 想了解什么 | 看哪里 |
+|---|---|
+| 从零跑通训练 / 评测的完整流程、产物清单、排障 | [`WORKFLOW.md`](WORKFLOW.md) |
+| 每个脚本的用法、数据构建、超参含义 | [`docs/usage_qwen3.5.md`](docs/usage_qwen3.5.md) |
+| SearchAgent、检索信息与混合 Beacon 的逐层算法与张量流 | [`SEARCH_AGENT_BEACON_METHOD.md`](SEARCH_AGENT_BEACON_METHOD.md) |
+| 迁移结论、里程碑结果、Beacon 移植状态 | 本文件下文 |
+
+## 快速开始（新克隆）
+
+```bash
+# 1) 建环境（详见下文「环境」一节）
+conda create -n search-comp-qwen3.5 python=3.11 -y
+conda activate search-comp-qwen3.5
+python -m pip install -r requirements.txt
+
+# 2) 不加载模型权重的单元测试（应全绿：24 passed）
+bash scripts/10_test.sh
+
+# 3) 端到端冒烟：探针 -> 训练 -> 评测
+bash scripts/00_searchagent_probe.sh                       # 自动建小语料并探检索能力
+bash scripts/20_native_train.sh configs/train/native_qwen3.5.yaml
+bash scripts/21_native_eval.sh outputs/models/native_qwen3_sft_v1/final
+```
+
+> **仓库不含大文件。** `outputs/data/`（语料，约 70MB）、`outputs/models/`
+> （checkpoint）与 `outputs/logs/` 都不入库，分别由训练/评测脚本首次运行自动重建，
+> 或从 Hugging Face 拉取。基础模型 `Qwen/Qwen3.5-2B` 权重首次运行时会从
+> Hugging Face 下载并缓存到 `~/.cache/huggingface/hub/`。
+> Search-R1 SFT 轨迹（约 60MB）需自行下载，命令见
+> [`docs/usage_qwen3.5.md`](docs/usage_qwen3.5.md) 第 1.1 节。
+
 > ⚠️ **重要架构事实**：`Qwen/Qwen3.5-2B` 不是 Qwen2 式纯因果 LM，而是**多模态
 > 混合架构**（`Qwen3_5ForConditionalGeneration`）——24 层中仅 6 层为标准
 > `full_attention`（带 QKV 缓存），其余 18 层为 `linear_attention`
 > （GatedDeltaNet，固定尺寸循环状态）；并含 mRoPE、注意力输出门控、
 > partial_rotary。因此 Beacon 压缩只能落在 6 个 full_attention 层上，移植工作量
-> 远超「只换基础模型」，详见下文「Beacon 移植状态」。
-
-> 📖 **训练/测试脚本与超参数说明**：见 [`docs/usage_qwen3.5.md`](docs/usage_qwen3.5.md)。
+> 远超「只换基础模型」，详见下文「里程碑 2：Beacon 移植到 Qwen3.5」。
 
 ---
 
@@ -19,13 +50,19 @@
 ```bash
 conda create -n search-comp-qwen3.5 python=3.11 -y
 conda activate search-comp-qwen3.5
-pip install torch --index-url https://download.pytorch.org/whl/cu124
-pip install "transformers==5.9.0" accelerate datasets rank-bm25 sentencepiece \
-            numpy tqdm pyyaml safetensors protobuf bitsandbytes pytest
+# 先装与本机 CUDA 匹配的 torch，再装其余依赖（实测环境为 CUDA 12.6 / torch 2.7.0）
+pip install torch==2.7.0 --index-url https://download.pytorch.org/whl/cu126
+pip install -r requirements.txt
 ```
 
-> `transformers>=5` 才识别 `model_type=qwen3_5`（4.57 发行版不含）。Qwen3.5-2B
-> 权重已缓存在本地 `~/.cache/huggingface/hub/models--Qwen--Qwen3.5-2B`。
+> `transformers>=5` 才识别 `model_type=qwen3_5`（4.57 发行版不含），
+> `requirements.txt` 已锁定该下界。Qwen3.5-2B 权重首次运行时从 Hugging Face
+> 下载并缓存到 `~/.cache/huggingface/hub/models--Qwen--Qwen3.5-2B`；离线环境请
+> 预先 `huggingface-cli download Qwen/Qwen3.5-2B` 并设置 `HF_HOME`。
+>
+> 脚本默认优先使用名为 `search-comp-qwen3.5` 的 conda 环境；可用 `PYTHON=` 指定
+> 其他解释器，用 `CONDA_ENV=` 换环境名。无需 conda 时确保 `python -c "import torch"`
+> 可用即可。
 
 ---
 
@@ -91,8 +128,8 @@ bash scripts/21_native_eval.sh outputs/models/native_qwen3_sft_v1/final
 
 ## 里程碑 2：Beacon 移植到 Qwen3.5（已实现并验证正确性）✅
 
-`search_comp/models/beacon_qwen3.py` 把 Beacon 机制落到 **6 个 full_attention 层**，
-语义与参考实现完全一致：
+`search_comp/models/beacon_qwen3.py` 把 Beacon 机制同时适配到 full attention 与
+linear attention 两类层：
 
 - **只压缩检索内容**：由 ``regions``（各 ``<information>`` 块）指定，文档按
   ``beacon_window`` 切窗，每窗末尾追加 ``window // beacon_ratio`` 个 beacon，
@@ -101,7 +138,13 @@ bash scripts/21_native_eval.sh outputs/models/native_qwen3_sft_v1/final
   think/search/answer 生成片段上计算损失。
 - `BeaconQwen3Attention`：独立 `beacon_q/k/v/o_proj`，`torch.where` 切换（含门控
   query），K/V 缓存保存 RoPE 前 key 并每窗口重施加 mRoPE。
-- linear_attention 层用 transformers `DynamicCache` 跨窗口承接 GatedDeltaNet 循环状态。
+- linear_attention 层不再跨压缩窗保留原生 `DynamicCache`。压缩窗内的
+  GatedDeltaNet recurrent/conv state 仅作临时 reader 状态；窗结束后原生状态被
+  丢弃，仅由该层 beacon 激活经 `BeaconLinearStateWriter` 重建持久 recurrent state，
+  conv 尾状态清空。因此跨压缩边界不存在原始 `<information>` token 的隐藏状态旁路。
+
+> 旧版 Beacon checkpoint 没有训练 linear-state writer，加载时会明确拒绝，而不会用
+> 随机 writer 静默推理；需要用当前实现重新训练 Beacon 参数。
 
 **正确性验证**（`bash scripts/verify_beacon.sh`）：
 - 空压缩区（all-keep）beacon 前向 vs 原生前向损失差 < 0.05（实测 ~0.008）。
@@ -110,13 +153,17 @@ bash scripts/21_native_eval.sh outputs/models/native_qwen3_sft_v1/final
 
 **训练**：`search_comp/trainer/beacon_trainer.py`（tqdm 可视化，8-bit AdamW）。
 - 交互式轨迹数据（自动构建语料+轨迹）：`bash scripts/22_beacon_train.sh`
-- Search-R1 官方 SFT 轨迹（messages 格式，`data_mode: searchr1`，直接用
-  `Search-R1-SFT-jsonl/qwen3-4b-instruct-sft.jsonl`）：`bash scripts/24_beacon_train_searchr1.sh`
+- Search-R1 官方 SFT 轨迹（messages 格式，`data_mode: searchr1`，读
+  `outputs/data/searchr1/qwen3-4b-instruct-sft.jsonl`，该文件**不在仓库内**，
+  下载方式见 [`docs/usage_qwen3.5.md`](docs/usage_qwen3.5.md) 第 1.1 节）：
+  `bash scripts/24_beacon_train_searchr1.sh`
 
-> 显存注意：beacon 手写窗口前向未做逐层梯度检查点（linear_attention 层有
-> DeltaNet 循环状态，checkpoint 需谨慎处理），因此 24GB 单卡训练长序列
-> （max_length≈8192）可能 OOM。可调小 `max_length`/`beacon_window`，或后续接入
-> flash-linear-attention + causal-conv1d 快速内核（见 Qwen3.5 加载时的提示）。
+> 显存注意：Beacon 前向保留跨窗口状态，不能直接对整个模型启用 Trainer 层级
+> checkpoint。当前实现已对有效监督位置分块计算 LM head，并可对长样本启用
+> loss checkpoint 与 CPU activation offload；24GB 单卡建议保持
+> `beacon_loss_chunk_size=32`、`beacon_checkpoint_loss=true`、
+> `beacon_cpu_offload_threshold=2048`。若仍 OOM，先降低该分块大小或限制样本长度。
+> 训练结束后的 LoRA 合并默认在 CPU 执行，避免第二次占满 GPU 显存。
 
 **推理**：`prefill_and_get_cache` + `decode_step` + `beacon_generate` 已实现，
 把文档压缩为 beacon K/V 后自回归解码（`</search>`/`</answer>` 分段停止）。
@@ -129,8 +176,21 @@ bash scripts/21_native_eval.sh outputs/models/native_qwen3_sft_v1/final
 ## 测试
 
 ```bash
-PYTHONPATH=. pytest tests/ -q     # 12 passed（em_f1 / retrieval / 里程碑烟雾）
+bash scripts/10_test.sh            # 等价于 pytest tests -q，日志同时落到 outputs/logs/
+# 24 passed（不需要 GPU；不加载模型权重）
 ```
 
-覆盖：EM/F1 指标、BM25 检索、Qwen3.5 tokenizer 推理特殊 token、轨迹
-think→search→<information>→answer 的压缩区/损失区定位。
+> 默认测试会从 Hugging Face 拉取 Qwen3.5 的 **tokenizer 文件**（数 MB，不是模型
+> 权重）到 `~/.cache/huggingface/`。完全离线时请先缓存，或设置
+> `HF_HUB_OFFLINE=1` 复用已有缓存。
+
+覆盖：EM/F1 指标、BM25 检索、Search-R1 轨迹压缩区与损失区定位、
+Qwen3.5 tokenizer 推理特殊 token、轨迹
+think→search→<information>→answer 的压缩区/损失区定位、统计汇总、配置覆盖与
+运行元数据。
+
+本地已缓存 Qwen3.5-2B 权重时，可追加真实权重回归（需要 GPU，约 1 分钟）：
+
+```bash
+FULL_MODEL_TEST=1 CUDA_VISIBLE_DEVICES=0 bash scripts/10_test.sh
+```

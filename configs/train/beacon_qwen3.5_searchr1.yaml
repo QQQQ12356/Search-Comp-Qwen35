@@ -1,13 +1,24 @@
 # Qwen3.5 Beacon 训练 —— 使用 Search-R1 官方 SFT 轨迹（messages 格式）
-# 训练数据：/home/huangzj/proj/searchagent/Search-R1-SFT-jsonl/qwen3-4b-instruct-sft.jsonl
 # 只压缩 <information> 检索文档块，损失只在 assistant 生成片段上计算。
+#
+# 训练数据（约 60MB，不在本仓库内）默认放在仓库相对路径下，需先自行获取：
+#   mkdir -p outputs/data/searchr1
+#   huggingface-cli download --repo-type dataset PeterJinGo/nq_hotpotqa_train \
+#       --include '*instruct-sft.jsonl' --local-dir outputs/data/searchr1
+# 已有该文件时也可以直接建软链，或命令行覆盖：
+#   --set train_data_path=/abs/path/to/qwen3-4b-instruct-sft.jsonl
 # LoRA 微调：冻结基础模型，只训练低秩适配器 + beacon 参数，降低显存开销。
 model_name_or_path: "Qwen/Qwen3.5-2B"
 data_mode: "searchr1"
-train_data_path: "/home/huangzj/proj/searchagent/Search-R1-SFT-jsonl/qwen3-4b-instruct-sft.jsonl"
-max_length: 2048
+train_data_path: "outputs/data/searchr1/qwen3-4b-instruct-sft.jsonl"
+# 不截断 Search-R1 轨迹；每条样本保留完整的搜索、检索和回答过程。
 learning_rate: 5.0e-5
 weight_decay: 0.01
+optim: "adamw_bnb_8bit"
+lr_scheduler_type: "constant"
+warmup_steps: 0
+max_grad_norm: 1.0
+use_bf16: true
 # 训练终止方式二选一：
 #   方式一（按步数，推荐）：设置 max_train_steps，训练到恰好该优化器步数停止，覆盖 num_epochs。
 #     约 2.4w 条 / grad_accum 8 ≈ 3000 步/epoch，例如一份数据想用 1 epoch 就设 max_train_steps: 3000。
@@ -15,20 +26,24 @@ weight_decay: 0.01
 # max_train_steps: 3000
 num_epochs: 1
 max_train_steps: 2000
-grad_accum_steps: 2
+grad_accum_steps: 4
 # 实时日志：每多少优化器步打印一次 loss/grad_norm/lr（transformers.Trainer）
 logging_steps: 5
 save_freq_steps: 1000
+eval_steps: 10000
+val_data_path: null
 seed: 42
-exp_name: "beacon_qwen3_searchr1_v1"
+exp_name: "beacon_qwen3_searchr1_v3"
 output_dir: "outputs"
 # LoRA 配置（use_lora: true 时生效）
 use_lora: true
 lora_r: 16
 lora_alpha: 32
 lora_dropout: 0.05
-# 梯度检查点（降低激活显存，linear_attention 层尤其关键）
-gradient_checkpointing: true
+# 混合 Beacon 使用显式跨窗状态，当前不做 Trainer 层级重计算。
+gradient_checkpointing: false
+# 启动时随机抽样多少条轨迹统计 token 长度，写入 dataset_summary.json。
+length_diagnostics_samples: 1000
 beacon:
   enable_beacon: true
   beacon_window: 512
@@ -38,3 +53,11 @@ beacon:
   beacon_embed_init: "eos"
   beacon_pos: "append"
   beacon_attn: "full-coverage"
+  beacon_linear_writer_rank: 128
+  # 只对 labels != -100 的位置计算 LM head；分块越小峰值显存越低、速度略慢。
+  beacon_loss_chunk_size: 32
+  # 反向时重算每个 loss chunk 的 LM head，避免保存巨大 full-vocab logits。
+  beacon_checkpoint_loss: true
+  # 24GB 单卡长尾保护：只对超长样本把 autograd 保存激活卸载到 CPU。
+  beacon_cpu_offload_activations: true
+  beacon_cpu_offload_threshold: 2048

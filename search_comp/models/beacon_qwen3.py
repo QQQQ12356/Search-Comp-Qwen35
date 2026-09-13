@@ -11,9 +11,9 @@
   beacon，beacon K/V 进入持久缓存，原始文档 K/V 丢弃。
 - **损失不含检索内容**：labels 全局预移位后，文档与 beacon 位置为 -100，
   只在模型生成片段（think / <search> / <answer>）上计算损失。
-- **Beacon 只作用于 full_attention 层**：6 个 full_attention 层做 K/V 压缩；
-  linear_attention 层用 transformers ``DynamicCache`` 跨窗口承接循环状态
-  （其内存天然有界，无需压缩）。
+- **混合层都只提交 Beacon 载体**：full_attention 层只持久化 beacon K/V；
+  linear_attention 层把压缩窗的原生 DeltaNet/卷积状态视为临时 reader 状态，
+  窗结束后丢弃，并仅由 beacon 激活经可训练 writer 重建固定尺寸循环状态。
 
 ``enable_beacon=False`` 退化为原生 ``Qwen3_5ForCausalLM`` 前向。
 """
@@ -26,7 +26,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from transformers import DynamicCache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5Attention,
@@ -35,7 +34,60 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
 )
 
 from .beacon_config import BeaconConfig
-from .modeling_utils import cat_tensor, compute_loss, slice_tensor
+from .modeling_utils import cat_tensor, slice_tensor
+
+
+class BeaconLinearStateWriter(nn.Module):
+    """仅从 Beacon 激活更新 GatedDeltaNet 的持久循环状态。"""
+
+    def __init__(self, config, rank: int):
+        super().__init__()
+        self.num_heads = config.linear_num_value_heads
+        self.key_dim = config.linear_key_head_dim
+        self.value_dim = config.linear_value_head_dim
+        self.norm = nn.LayerNorm(config.hidden_size)
+        self.down = nn.Linear(config.hidden_size, rank, bias=False)
+        self.up = nn.Linear(
+            rank,
+            self.num_heads * (self.key_dim + self.value_dim + 2),
+        )
+        with torch.no_grad():
+            self.up.bias.zero_()
+            self.up.bias[-2 * self.num_heads:-self.num_heads].fill_(4.0)
+
+    def forward(self, beacons, previous):
+        batch = beacons.shape[0]
+        projected = self.up(F.silu(self.down(self.norm(beacons))))
+        key, value, decay, beta = projected.split(
+            [
+                self.num_heads * self.key_dim,
+                self.num_heads * self.value_dim,
+                self.num_heads,
+                self.num_heads,
+            ],
+            dim=-1,
+        )
+        key = key.reshape(batch, -1, self.num_heads, self.key_dim).float()
+        key = key * torch.rsqrt(key.square().sum(-1, keepdim=True) + 1e-6)
+        value = value.reshape(batch, -1, self.num_heads, self.value_dim).float()
+        if previous is None:
+            state = torch.zeros(
+                batch,
+                self.num_heads,
+                self.key_dim,
+                self.value_dim,
+                device=beacons.device,
+                dtype=torch.float32,
+            )
+        else:
+            state = previous.float().clone()
+        for token_idx in range(beacons.shape[1]):
+            state = state * decay[:, token_idx].float().sigmoid()[..., None, None]
+            token_key = key[:, token_idx]
+            prediction = (state * token_key.unsqueeze(-1)).sum(-2)
+            update = (value[:, token_idx] - prediction) * beta[:, token_idx].float().sigmoid().unsqueeze(-1)
+            state = state + token_key.unsqueeze(-1) * update.unsqueeze(-2)
+        return state
 
 
 # ======================================================================
@@ -204,14 +256,15 @@ class BeaconQwen3Attention(Qwen3_5Attention):
 
 
 # ======================================================================
-# Beacon 窗口状态机（只压缩检索内容，线性层用 DynamicCache 承接状态）
+# Beacon 窗口状态机（只压缩检索内容，线性层显式管理压缩状态）
 # ======================================================================
 class _Qwen3BeaconMemory:
     """把整条序列切窗处理的状态机。
 
     - full_attention 层：``_cache[layer_idx] = (K, V)`` 持久缓存（RoPE 之前），
       compress 窗口只保留 beacon K/V，keep 窗口全量保留。
-    - linear_attention 层：``DynamicCache`` 跨窗口承接 GatedDeltaNet 循环状态。
+    - linear_attention 层：显式保存循环状态与卷积尾状态；压缩窗只提交由
+      beacon writer 生成的循环状态，卷积尾状态清空，杜绝原始文档残留。
     """
 
     def __init__(self, model, beacon_config: BeaconConfig):
@@ -225,7 +278,8 @@ class _Qwen3BeaconMemory:
         self._cache: List[Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]] = [
             (None, None) for _ in range(self.num_layers)
         ]
-        self._linear_cache: Optional[DynamicCache] = None
+        self._linear_recurrent = {}
+        self._linear_conv = {}
         self.reset()
 
     def reset(self):
@@ -233,7 +287,8 @@ class _Qwen3BeaconMemory:
         self._seg_idx = 0
         self._segments: List[Tuple[int, int, str]] = []
         self._cache = [(None, None) for _ in range(self.num_layers)]
-        self._linear_cache = DynamicCache(config=self.config)
+        self._linear_recurrent = {}
+        self._linear_conv = {}
         self._batch_loss = None
         self._valid_num = None
         self._store = None
@@ -397,9 +452,16 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         self.beacon_config = BeaconConfig.from_model_config(config)
         self.model.beacon_embed_tokens = nn.Embedding(1, config.hidden_size)
         self.model.beacon_embed_tokens.weight.data.zero_()
+        self.model.beacon_linear_writers = nn.ModuleDict()
         for idx, layer in enumerate(self.model.layers):
-            if getattr(config, "layer_types", [None] * config.num_hidden_layers)[idx] == "full_attention":
+            layer_type = getattr(config, "layer_types", [None] * config.num_hidden_layers)[idx]
+            if layer_type == "full_attention":
                 layer.self_attn = BeaconQwen3Attention(config, idx)
+            elif layer_type == "linear_attention":
+                self.model.beacon_linear_writers[str(idx)] = BeaconLinearStateWriter(
+                    config,
+                    self.beacon_config.beacon_linear_writer_rank,
+                )
         self.post_init()
         self._init_beacon_params()
 
@@ -412,6 +474,10 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
             else:
                 self.model.beacon_embed_tokens.weight.data.normal_(0, cfg.hidden_size ** -0.5)
         params = self.beacon_config.beacon_param.split()
+        for writer in self.model.beacon_linear_writers.values():
+            with torch.no_grad():
+                writer.up.bias.zero_()
+                writer.up.bias[-2 * writer.num_heads:-writer.num_heads].fill_(4.0)
         for idx, layer in enumerate(self.model.layers):
             if getattr(cfg, "layer_types", [None] * cfg.num_hidden_layers)[idx] != "full_attention":
                 continue
@@ -427,7 +493,14 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
                         b.bias.data.copy_(o.bias.data)
 
     def set_beacon_config(self, beacon_config: BeaconConfig):
+        for writer in self.model.beacon_linear_writers.values():
+            if writer.down.out_features != beacon_config.beacon_linear_writer_rank:
+                raise ValueError(
+                    "checkpoint 的 beacon_linear_writer_rank 与请求配置不一致: "
+                    f"{writer.down.out_features} != {beacon_config.beacon_linear_writer_rank}"
+                )
         self.beacon_config = beacon_config
+        beacon_config.merge_into_config(self.config)
         return self
 
     # ------------------------------------------------------------------
@@ -443,7 +516,20 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
             compress_regions = regions
         if compress_regions is None:
             raise ValueError("beacon 模式必须提供 compress_regions 或 compress_start/compress_end")
-        loss, logits = self._beacon_forward(input_ids, labels, compress_regions)
+        use_cpu_offload = (
+            self.training
+            and labels is not None
+            and self.beacon_config.beacon_cpu_offload_activations
+            and (
+                self.beacon_config.beacon_cpu_offload_threshold == 0
+                or input_ids.shape[1] >= self.beacon_config.beacon_cpu_offload_threshold
+            )
+        )
+        if use_cpu_offload:
+            with torch.autograd.graph.save_on_cpu(pin_memory=input_ids.is_cuda):
+                loss, logits = self._beacon_forward(input_ids, labels, compress_regions)
+        else:
+            loss, logits = self._beacon_forward(input_ids, labels, compress_regions)
         # 返回 ModelOutput，兼容 transformers.Trainer（取 outputs["loss"]）
         return CausalLMOutputWithPast(loss=loss, logits=logits)
 
@@ -465,56 +551,147 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
                 return emb
         return self.model.embed_tokens(input_ids)
 
-    def _native_forward(self, win_ids, win_labels, attn_mask, position_embeddings, past):
+    def _native_forward(
+        self,
+        win_ids,
+        win_labels,
+        attn_mask,
+        position_embeddings,
+        past,
+        last_logits_only=False,
+    ):
         """单窗口前向。past: list of (layer_idx, 4元组)。返回 (new_past, logits)。"""
         beacon_size = past[0][1][2] if past else 0
         emb = self._embed(win_ids, beacon_size)
 
-        use_gc = self.training and getattr(self, "_use_gradient_checkpointing", False)
         hidden = emb
         new_past = []
-        linear_cache = self._mem._linear_cache if not use_gc else None
         for idx, layer in enumerate(self.model.layers):
             residual = hidden
             hidden = layer.input_layernorm(hidden)
             if self._mem.layer_types[idx] == "full_attention":
                 pkv = next(pv for li, pv in past if li == idx)
-                if use_gc:
-                    out, npv = torch.utils.checkpoint.checkpoint(
-                        layer.self_attn, hidden, position_embeddings, attn_mask, pkv,
-                        use_reentrant=False,
-                    )
-                else:
-                    out, npv = layer.self_attn(
-                        hidden, position_embeddings=position_embeddings,
-                        attention_mask=attn_mask, past_key_value=pkv,
-                    )
+                out, npv = layer.self_attn(
+                    hidden, position_embeddings=position_embeddings,
+                    attention_mask=attn_mask, past_key_value=pkv,
+                )
                 new_past.append((idx, npv))
             else:
-                if use_gc:
-                    # 线性注意力层：训练时用 cache_params=None（与 transformers 的
-                    # GradientCheckpointingLayer 一致，避免 DeltaNet 状态在重计算中
-                    # 不一致），并做梯度检查点以释放 O(seq×chunk×head) 中间量。
-                    out = torch.utils.checkpoint.checkpoint(
-                        layer.linear_attn, hidden, None, use_reentrant=False,
-                    )
-                else:
-                    out = layer.linear_attn(hidden, cache_params=linear_cache)
+                previous_recurrent = self._mem._linear_recurrent.get(idx)
+                previous_conv = self._mem._linear_conv.get(idx)
+                out, reader_recurrent, reader_conv = self._linear_attention_forward(
+                    layer.linear_attn,
+                    hidden,
+                    previous_recurrent,
+                    previous_conv,
+                )
             hidden = residual + out
             residual = hidden
             hidden = layer.post_attention_layernorm(hidden)
             hidden = layer.mlp(hidden)
             hidden = residual + hidden
+            if self._mem.layer_types[idx] == "linear_attention":
+                if self._mem._store == "beacon":
+                    beacon_mask = self._mem._step_beacon_indices.bool()
+                    beacon_hidden = hidden[:, beacon_mask]
+                    writer = self.model.beacon_linear_writers[str(idx)]
+                    self._mem._linear_recurrent[idx] = writer(beacon_hidden, previous_recurrent)
+                    self._mem._linear_conv.pop(idx, None)
+                else:
+                    self._mem._linear_recurrent[idx] = reader_recurrent
+                    self._mem._linear_conv[idx] = reader_conv
 
         hidden = self.model.norm(hidden)
-        logits = self.lm_head(hidden).float()
+        logits = None
 
         if win_labels is not None:
-            _loss, token_loss = compute_loss(logits, win_labels, shift=False)
-            valid_num = (win_labels != -100).sum(-1).clamp(min=1)
-            batch_loss = token_loss.sum(-1) / valid_num
-            self._mem.update_loss(batch_loss, valid_num)
+            valid_num = (win_labels != -100).sum(-1)
+            if valid_num.sum().item() > 0:
+                batch_loss = self._sparse_window_loss(hidden, win_labels, valid_num)
+                self._mem.update_loss(batch_loss, valid_num)
+        elif last_logits_only:
+            logits = self.lm_head(hidden[:, -1:, :]).float()
+        else:
+            logits = self.lm_head(hidden).float()
         return new_past, logits
+
+    def _sparse_window_loss(self, hidden, labels, valid_num):
+        """只为非 ``-100`` 位置计算分块词表交叉熵。"""
+        chunk_size = self.beacon_config.beacon_loss_chunk_size
+        checkpoint_loss = self.beacon_config.beacon_checkpoint_loss and self.training
+        batch_losses = []
+        for batch_idx in range(hidden.shape[0]):
+            selected_hidden = hidden[batch_idx, labels[batch_idx] != -100]
+            selected_labels = labels[batch_idx, labels[batch_idx] != -100]
+            loss_sum = hidden.new_zeros((), dtype=torch.float32)
+            for start in range(0, selected_hidden.shape[0], chunk_size):
+                chunk_hidden = selected_hidden[start:start + chunk_size]
+                chunk_labels = selected_labels[start:start + chunk_size]
+
+                def loss_function(current_hidden, current_labels):
+                    chunk_logits = self.lm_head(current_hidden).float()
+                    return F.cross_entropy(chunk_logits, current_labels, reduction="sum")
+
+                if checkpoint_loss and chunk_hidden.requires_grad:
+                    chunk_loss = torch.utils.checkpoint.checkpoint(
+                        loss_function,
+                        chunk_hidden,
+                        chunk_labels,
+                        use_reentrant=False,
+                    )
+                else:
+                    chunk_loss = loss_function(chunk_hidden, chunk_labels)
+                loss_sum = loss_sum + chunk_loss
+            batch_losses.append(loss_sum / valid_num[batch_idx].clamp(min=1))
+        return torch.stack(batch_losses)
+
+    @staticmethod
+    def _linear_attention_forward(module, hidden, previous_recurrent, previous_conv):
+        """Qwen3.5 GatedDeltaNet 的显式、可微分状态前向。"""
+        batch, length, _ = hidden.shape
+        projected = module.in_proj_qkv(hidden).transpose(1, 2)
+        if previous_conv is not None:
+            conv_input = torch.cat([previous_conv, projected], dim=-1)
+        else:
+            conv_input = projected
+        padded = F.pad(conv_input, (module.conv_kernel_size - conv_input.shape[-1], 0))
+        next_conv = padded[..., -module.conv_kernel_size:]
+        if module.causal_conv1d_fn is not None:
+            mixed = module.causal_conv1d_fn(
+                x=conv_input,
+                weight=module.conv1d.weight.squeeze(1),
+                bias=module.conv1d.bias,
+                activation=module.activation,
+            )
+        else:
+            mixed = F.silu(module.conv1d(conv_input)[:, :, :conv_input.shape[-1]])
+        mixed = mixed[:, :, -length:].transpose(1, 2)
+
+        query, key, value = mixed.split([module.key_dim, module.key_dim, module.value_dim], dim=-1)
+        query = query.reshape(batch, length, -1, module.head_k_dim)
+        key = key.reshape(batch, length, -1, module.head_k_dim)
+        value = value.reshape(batch, length, -1, module.head_v_dim)
+        repeat = module.num_v_heads // module.num_k_heads
+        if repeat > 1:
+            query = query.repeat_interleave(repeat, dim=2)
+            key = key.repeat_interleave(repeat, dim=2)
+        decay = -module.A_log.float().exp() * F.softplus(
+            module.in_proj_a(hidden).float() + module.dt_bias
+        )
+        output, next_recurrent = module.chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            g=decay,
+            beta=module.in_proj_b(hidden).sigmoid(),
+            initial_state=previous_recurrent,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+        )
+        gate = module.in_proj_z(hidden).reshape(-1, module.head_v_dim)
+        output = module.norm(output.reshape(-1, module.head_v_dim), gate)
+        output = module.out_proj(output.reshape(batch, length, module.value_dim))
+        return output, next_recurrent, next_conv
 
     def _beacon_forward(self, input_ids, labels, regions):
         self._mem = _Qwen3BeaconMemory(self, self.beacon_config)
@@ -528,6 +705,8 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
             self._mem.update_memory(new_past)
 
         loss = self._mem.output()
+        if loss is None:
+            loss = self.model.beacon_embed_tokens.weight.sum() * 0.0
         return loss, last_logits
 
     # ------------------------------------------------------------------
@@ -565,7 +744,7 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
 
         Returns:
             ``return_last_logits=False`` 时返回 :class:`_Qwen3BeaconMemory`（其
-            ``_cache`` / ``_linear_cache`` 已就绪）；``True`` 时返回
+            ``_cache`` / ``_linear_recurrent`` / ``_linear_conv`` 已就绪）；``True`` 时返回
             ``(memory, last_logits)``。
         """
         self._mem = _Qwen3BeaconMemory(self, self.beacon_config)
@@ -574,7 +753,14 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         last_logits = None
         while not self._mem.finish:
             win_ids, _, attn_mask, position_embeddings, past = self._mem.step()
-            new_past, logits = self._native_forward(win_ids, None, attn_mask, position_embeddings, past)
+            new_past, logits = self._native_forward(
+                win_ids,
+                None,
+                attn_mask,
+                position_embeddings,
+                past,
+                last_logits_only=True,
+            )
             self._mem.update_memory(new_past)
             # 每个窗口末位 logits = 对下一 token 的预测；prefill 结束即首个新 token 的预测
             last_logits = logits[:, -1, :]
@@ -593,7 +779,14 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         past = self._mem_full_cache_past()
 
         self._mem._store = "cache"
-        new_past, logits = self._native_forward(last_token_ids, None, attn_mask, (cos, sin), past)
+        new_past, logits = self._native_forward(
+            last_token_ids,
+            None,
+            attn_mask,
+            (cos, sin),
+            past,
+            last_logits_only=True,
+        )
         self._mem.update_memory(new_past)
         return logits[:, -1, :]
 
@@ -676,6 +869,12 @@ def load_beacon_qwen3_5(model_name_or_path, beacon_config=None,
 
     cfg = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
     if "BeaconQwen3_5ForCausalLM" in (cfg.architectures or []):
+        if not hasattr(cfg, "beacon_linear_writer_rank"):
+            raise RuntimeError(
+                "该 checkpoint 来自旧版 Qwen3.5 Beacon：它保留了原始 information 的 "
+                "linear-attention DynamicCache，且不含已训练的 BeaconLinearStateWriter。"
+                "为避免静默使用随机 writer，必须用当前实现重新训练 Beacon 参数。"
+            )
         model = BeaconQwen3_5ForCausalLM.from_pretrained(
             model_name_or_path, torch_dtype=torch_dtype, device_map="cpu"
         )

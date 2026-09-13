@@ -1,9 +1,13 @@
 """Search-R1 SFT 数据集（messages 格式）与 collator。
 
 从搜索/检索增强模型的 SFT 轨迹（``messages`` 对话格式）直接构造
-beacon 训练样本，**不再**用规则生成轨迹。数据来源：
+beacon 训练样本，**不再**用规则生成轨迹。数据来源为 Search-R1 官方发布的
+``{backbone}-instruct-sft.jsonl``（见 :data:`SEARCH_R1_DATA_HINT`），默认放在：
 
-    /home/huangzj/proj/searchagent/Search-R1-SFT-jsonl/{backbone}-instruct-sft.jsonl
+    outputs/data/searchr1/{backbone}-instruct-sft.jsonl
+
+该文件不在本仓库内（约 60MB），首次使用请按提示下载，或直接把
+``train_data_path`` 指向本地已有路径。
 
 每行形如（Search-R1 原文格式，含系统 / 用户 / 助手多轮）::
 
@@ -17,13 +21,12 @@ beacon 训练样本，**不再**用规则生成轨迹。数据来源：
 
 设计要点：
 
-- 用 ``apply_chat_template`` **逐条消息增量编码**：第 ``i`` 条消息的 token 区间
-  长度 = 前缀 ``[0..i]`` 编码长度 − 前缀 ``[0..i-1]`` 编码长度，从而精确对齐
-  chat 模板的角色标记 / 分隔符 / eos，无需手拼模板。
+- 训练/评测统一为裸检索协议：初始 system/user prompt 使用 ChatML；assistant 输出与
+  后续 ``<information>`` 检索结果直接拼接，不额外插入 user/assistant ChatML 边界。
 - **loss（labels）**：只对 ``role == "assistant"`` 的 token 计算（think / search /
   answer 均为模型输出，整体作为 SFT 目标）。
-- **压缩区（regions）**：``role == "user"`` 且内容以 ``<information>`` 开头
-  的整个消息块对应的 token 区间，就是 beacon 要压缩的文档区。
+- **压缩区（regions）**：每个裸 ``<information>`` 块的文档正文对应一个压缩区；
+  XML 标签保留在上下文内，但不参与 Beacon 压缩。
 - 样本结构多变（turn 数、文档长度都不同），且需逐样本对齐压缩区与 loss 区间，
   因此**仅支持 batch_size=1**（用梯度累积扩大有效 batch）。
 
@@ -42,10 +45,23 @@ import torch
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer
 
+from .trajectory import INFO_PREFIX, INFO_SUFFIX
+
+#: 训练数据不在仓库内时的获取提示（拼进报错信息，方便新用户自助解决）。
+SEARCH_R1_DATA_HINT = (
+    "Search-R1 SFT 轨迹（*-instruct-sft.jsonl）不属于本仓库，请先下载：\n"
+    "  huggingface-cli download --repo-type dataset PeterJinGo/nq_hotpotqa_train \\\n"
+    "      --include '*instruct-sft.jsonl' --local-dir outputs/data/searchr1\n"
+    "或把配置里的 train_data_path 指向已有文件的绝对路径：\n"
+    "  bash scripts/24_beacon_train_searchr1.sh configs/train/beacon_qwen3.5_searchr1.yaml \\\n"
+    "      --set train_data_path=/path/to/qwen3-4b-instruct-sft.jsonl"
+)
+
 #: 标记文档块的 user 消息前缀（用于识别压缩区）
 _INFO_MARKER = "<information>"
 _SEARCH_PATTERN = re.compile(r"<search>")
 _ANSWER_PATTERN = re.compile(r"<answer>")
+_INFORMATION_PATTERN = re.compile(r"\s*<information>(.*?)</information>\s*", re.DOTALL)
 
 
 class SearchR1SFTDataset(Dataset):
@@ -53,17 +69,15 @@ class SearchR1SFTDataset(Dataset):
 
     Args:
         data_path: JSONL 路径，每行 ``{messages: [{role, content}, ...]}``。
-        tokenizer: HuggingFace tokenizer（Qwen2.5 系列）。
-        max_length: 最大 token 数（超出截断，超出的压缩/loss 区间被丢弃）。
+        tokenizer: HuggingFace tokenizer（Qwen3.5 系列）。
     """
 
     def __init__(
-        self, data_path: str, tokenizer: PreTrainedTokenizer, max_length: int = 8192
+        self, data_path: str, tokenizer: PreTrainedTokenizer
     ):
         if not os.path.exists(data_path):
-            raise FileNotFoundError(f"数据文件不存在: {data_path}")
+            raise FileNotFoundError(f"数据文件不存在: {data_path}\n{SEARCH_R1_DATA_HINT}")
         self.tokenizer = tokenizer
-        self.max_length = max_length
         self.samples: List[Dict[str, Any]] = []
         try:
             with open(data_path, "r", encoding="utf-8") as f:
@@ -102,41 +116,47 @@ class SearchR1SFTDataset(Dataset):
         regions: List[Tuple[int, int]] = []
         n_searches = 0
 
-        # 手动 ChatML 逐条渲染：绕过 chat 模板对 <think> 的 reasoning 抽取
-        # （模板会把中间搜索轮的 <think> 思考剥离、并为 assistant 自动插入空
-        # <think></think> 块），改用模型原生 <think>/</think> 特殊 token，保证
-        # 训练序列与推理格式一致、无空块。
-        for msg in msgs:
+        seen_assistant = False
+        for msg_idx, msg in enumerate(msgs):
             role = msg.get("role")
             content = msg.get("content", "") or ""
             if role == "assistant":
-                # 训练数据里的 <thinking> 统一改为原生 <think> 推理标签
-                content = content.replace("<thinking>", "<think>").replace("</thinking>", "</think>")
-            text = f"<|im_start|>{role}\n{content}<|im_end|>\n"
-            seg_ids = self.tokenizer(text, add_special_tokens=False).input_ids
-
-            start = len(input_ids)
-            end = start + len(seg_ids)
-
-            if role == "assistant":
-                # 模型输出整体作为 SFT 目标（think + search + answer）
+                if not seen_assistant:
+                    assistant_prefix_ids = self.tokenizer(
+                        "<|im_start|>assistant\n", add_special_tokens=False
+                    ).input_ids
+                    input_ids.extend(assistant_prefix_ids)
+                    labels.extend([-100] * len(assistant_prefix_ids))
+                seen_assistant = True
+                seg_ids = self.tokenizer(content, add_special_tokens=False).input_ids
+                # 模型输出整体作为 SFT 目标（thinking + search + answer）。
                 labels.extend(seg_ids)
                 n_searches += len(_SEARCH_PATTERN.findall(content))
-            elif role == "user" and content.lstrip().startswith(_INFO_MARKER):
-                # <information> 文档块 → beacon 压缩区
-                regions.append((start, end))
+            elif role == "user" and seen_assistant:
+                info_match = _INFORMATION_PATTERN.fullmatch(content)
+                if info_match is None:
+                    raise ValueError(
+                        "Search-R1 首个 assistant 消息后的 user 消息必须是 "
+                        f"完整 <information> 块: {sample.get('id', msg_idx)}"
+                    )
+                docs_ids = self.tokenizer(info_match.group(1), add_special_tokens=False).input_ids
+                prefix_ids = self.tokenizer(INFO_PREFIX, add_special_tokens=False).input_ids
+                suffix_ids = self.tokenizer(INFO_SUFFIX, add_special_tokens=False).input_ids
+                start = len(input_ids) + len(prefix_ids)
+                regions.append((start, start + len(docs_ids)))
+                seg_ids = prefix_ids + docs_ids + suffix_ids
                 labels.extend([-100] * len(seg_ids))
             else:
-                # system / 普通 user（问题）→ 不计损失、不压缩
+                # 初始 system / user prompt 使用 ChatML，与评测初始上下文完全一致。
+                if seen_assistant:
+                    raise ValueError(
+                        f"assistant 后不支持 role={role!r} 的非检索消息: {sample.get('id', msg_idx)}"
+                    )
+                text = f"<|im_start|>{role}\n{content}<|im_end|>\n"
+                seg_ids = self.tokenizer(text, add_special_tokens=False).input_ids
                 labels.extend([-100] * len(seg_ids))
 
             input_ids.extend(seg_ids)
-
-        # 截断保护：丢弃被截断的压缩区 / loss 区间
-        if len(input_ids) > self.max_length:
-            input_ids = input_ids[: self.max_length]
-            labels = labels[: self.max_length]
-            regions = [(s, e) for s, e in regions if e <= self.max_length]
 
         n_turns = sum(1 for m in msgs if m.get("role") == "assistant")
         return {

@@ -3,7 +3,7 @@
 训练数据与推理共用本模块，保证 ``<information>`` 块、prompt 模板、token 序列
 构造**完全一致**：
 
-- :data:`SEARCH_INSTRUCTION`：来自 Search-R1 原论文的搜索指令模板（user 消息）。
+- :data:`SEARCH_INSTRUCTION`：SearchAgent 搜索协议正文（放在 system 消息）。
 - :data:`INFO_PREFIX` / :data:`INFO_SUFFIX`：``<information>`` 块的前后缀。
 - :func:`build_assistant_segments`：把样本拆成 ``(text, kind)`` 片段，
   kind ∈ {"gen", "info_prefix", "docs", "info_suffix"}。
@@ -17,11 +17,15 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Tuple
 
-#: Search-R1 原论文的搜索指令模板（使用模型原生 <think>/</think> 推理标签，
-#: 与统一后的训练数据一致；带 "without detailed illustrations."）。
-SEARCH_INSTRUCTION = """Answer the given question. You must conduct reasoning inside <think> and </think> first every time you get new information. After reasoning, if you find you lack some knowledge, you can call a search engine by <search> query </search> and it will return the top searched results between <information> and </information>. You can search as many times as your want. If you find no further external knowledge needed, you can directly provide the answer inside <answer> and </answer>, without detailed illustrations. For example, <answer> Beijing </answer>.
+#: Search-R1 风格的搜索协议正文。该说明属于长期行为约束，因此放在 system 消息。
+SEARCH_INSTRUCTION = """Answer the given question. You must conduct reasoning inside <thinking> and </thinking> first every time you get new information. After reasoning, if you find you lack some knowledge, you can call a search engine by <search> query </search> and it will return the top searched results between <information> and </information>. You can search as many times as your want. If you find no further external knowledge needed, you can directly provide the answer inside <answer> and </answer>, without detailed illustrations. For example, <answer> Beijing </answer>."""
 
-Question: {question}"""
+#: 不含搜索协议的基础 system 文本，供提示词对照实验使用。
+BASE_SYSTEM_PROMPT = "You are a helpful and harmless assistant."
+
+#: 主训练和推理路径使用的 system 消息：基础角色说明 + 完整搜索协议。
+SYSTEM_PROMPT = f"{BASE_SYSTEM_PROMPT}\n\n{SEARCH_INSTRUCTION}"
+
 
 #: <information> 块前后缀（与 Search-R1 rollout 的 next_obs 格式一致）
 INFO_PREFIX = "\n\n<information>"
@@ -56,7 +60,9 @@ def build_search_chat_prompt(question: str, add_generation_prompt: bool = True) 
     Returns:
         ChatML 提示字符串。
     """
-    text = f"<|im_start|>user\n{SEARCH_INSTRUCTION.format(question=question)}<|im_end|>\n"
+    question = str(question).strip()
+    text = f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
+    text += f"<|im_start|>user\n{question}<|im_end|>\n"
     if add_generation_prompt:
         text += "<|im_start|>assistant\n"
     return text

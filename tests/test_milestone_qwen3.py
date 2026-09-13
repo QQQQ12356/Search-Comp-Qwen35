@@ -18,8 +18,10 @@ import pytest
 
 from search_comp.data.trajectory import (
     SEARCH_INSTRUCTION,
+    SYSTEM_PROMPT,
     build_assistant_segments,
     build_loss_labels,
+    build_search_chat_prompt,
     build_sequence_ids,
     extract_search_query,
 )
@@ -37,18 +39,18 @@ def tokenizer():
     return load_tokenizer("Qwen/Qwen3.5-2B")
 
 
-def test_chat_template_has_reasoning_tokens(tokenizer):
-    text = tokenizer.apply_chat_template(
-        [{"role": "user", "content": SEARCH_INSTRUCTION.format(question="Who founded Google?")}],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    # 生成提示以 ``<think>`` / ``</think>`` 起始（Qwen3.5 原生推理格式，与 SearchAgent 标签对齐）
-    assert "<think>" in text and "</think>" in text
+def test_search_instruction_is_system_and_user_is_question_only(tokenizer):
+    question = "Who founded Google?"
+    text = build_search_chat_prompt(question, add_generation_prompt=True)
+    assert f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>" in text
+    assert f"<|im_start|>user\n{question}<|im_end|>" in text
+    user_text = text.split("<|im_start|>user\n", 1)[1].split("<|im_end|>", 1)[0]
+    assert user_text == question
+    assert SEARCH_INSTRUCTION not in user_text
     ids = tokenizer(text, add_special_tokens=False).input_ids
     assert tokenizer.eos_token_id in (248046,)  # eos = <|im_end|>
     dec = tokenizer.decode(ids, skip_special_tokens=False)
-    assert "<think>" in dec and "</think>" in dec
+    assert question in dec
 
 
 def _sample():
@@ -67,10 +69,7 @@ def _sample():
 
 def test_sequence_build_regions_and_loss(tokenizer):
     s = _sample()
-    chat_input = tokenizer.apply_chat_template(
-        [{"role": "user", "content": SEARCH_INSTRUCTION.format(question=s["question"])}],
-        tokenize=False, add_generation_prompt=True,
-    )
+    chat_input = build_search_chat_prompt(s["question"], add_generation_prompt=True)
     ids, regions, gen_spans = build_sequence_ids(tokenizer, chat_input, s, max_length=4096)
     assert len(ids) > 0
     # 两个 <information> 文档压缩区

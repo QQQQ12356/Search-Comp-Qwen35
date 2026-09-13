@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest
 
 from search_comp.data.searchr1_dataset import SearchR1Collator, SearchR1SFTDataset
+from search_comp.data.trajectory import INFO_PREFIX, INFO_SUFFIX
 
 
 def _write_sample(path):
@@ -41,7 +42,7 @@ def tokenizer():
 def test_searchr1_dataset_regions_and_labels(tokenizer, tmp_path):
     data = tmp_path / "sft.jsonl"
     _write_sample(str(data))
-    ds = SearchR1SFTDataset(str(data), tokenizer, max_length=4096)
+    ds = SearchR1SFTDataset(str(data), tokenizer)
     assert len(ds) == 1
     s = ds[0]
 
@@ -49,9 +50,10 @@ def test_searchr1_dataset_regions_and_labels(tokenizer, tmp_path):
     assert len(s["regions"]) >= 1
     for rs, re in s["regions"]:
         assert rs < re <= len(s["input_ids"])
-        # 压缩区应覆盖 <information> 文档块内容（< 可能跨 token 边界，故断言文档正文）
+        # 压缩区只覆盖文档正文，不包含 <information> 标签。
         region_text = tokenizer.decode(s["input_ids"][rs:re])
-        assert "information" in region_text and "Document 1" in region_text
+        assert "Document 1" in region_text
+        assert "information" not in region_text
         # 压缩区内标签均为 -100（文档不计损失）
         assert all(l == -100 for l in s["labels"][rs:re])
 
@@ -61,6 +63,21 @@ def test_searchr1_dataset_regions_and_labels(tokenizer, tmp_path):
     # 两个 assistant 消息
     assert s["n_turns"] == 2
     assert s["n_searches"] == 1
+
+    full_text = tokenizer.decode(s["input_ids"])
+    assert full_text.count("<|im_start|>assistant") == 1
+    assert INFO_PREFIX in full_text
+    assert INFO_SUFFIX in full_text
+    assert "<thinking>\nNow I know." in full_text
+
+
+def test_searchr1_dataset_never_truncates_complete_trajectory(tokenizer, tmp_path):
+    data = tmp_path / "sft.jsonl"
+    _write_sample(str(data))
+    ds = SearchR1SFTDataset(str(data), tokenizer)
+    sample = ds[0]
+    assert len(sample["input_ids"]) > 10
+    assert sample["labels"][-1] != -100
 
 
 def test_collator_bs1_only(tokenizer):

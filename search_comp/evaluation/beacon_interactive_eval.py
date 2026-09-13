@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from typing import Any, Dict, List
 
 import torch
@@ -27,12 +28,16 @@ from ..data.retrieval import BM25Retriever, format_docs_as_reference
 from ..data.trajectory import (
     INFO_PREFIX,
     INFO_SUFFIX,
-    SEARCH_INSTRUCTION,
     build_search_chat_prompt,
     extract_search_query,
 )
 from ..models.beacon_config import BeaconConfig
 from .em_f1 import extract_answer
+from .statistics import summarize_results
+from ..utils.runtime import append_jsonl, write_json
+
+#: 模型未闭合 <answer>...</answer> 时的占位答案（按协议视为未作答，而非整段轨迹兜底）
+NO_ANSWER = "[无作答]"
 
 
 def run_beacon_agent(model, tokenizer, retriever, question, max_turns=3, topk=3,
@@ -83,8 +88,21 @@ def run_beacon_agent(model, tokenizer, retriever, question, max_turns=3, topk=3,
         context_ids[len(tokenizer(chat_prefix, add_special_tokens=False).input_ids):],
         skip_special_tokens=True,
     )
-    prediction = extract_answer(assistant_text) or assistant_text.strip()
-    return {"prediction": prediction, "turns": turns, "queries": queries, "output": assistant_text}
+    prediction = extract_answer(assistant_text) or NO_ANSWER
+    information_tokens = sum(end - start for start, end in regions)
+    ratio = model.beacon_config.beacon_ratio
+    beacon_tokens = sum(max(1, (end - start + ratio - 1) // ratio) for start, end in regions)
+    return {
+        "prediction": prediction,
+        "turns": turns,
+        "queries": queries,
+        "output": assistant_text,
+        "regions": regions,
+        "context_tokens": len(context_ids),
+        "information_tokens": information_tokens,
+        "beacon_tokens": beacon_tokens,
+        "generated_tokens": len(tokenizer(assistant_text, add_special_tokens=False).input_ids),
+    }
 
 
 def main() -> None:
@@ -97,12 +115,19 @@ def main() -> None:
     parser.add_argument("--max_turns", type=int, default=3)
     parser.add_argument("--topk", type=int, default=3)
     parser.add_argument("--max_docs_tokens", type=int, default=1024)
+    parser.add_argument("--max_new_tokens_per_turn", type=int, default=256)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="保留已有 JSONL，并跳过其中已完成的 id",
+    )
     args = parser.parse_args()
 
     from ..models.beacon_qwen3 import load_beacon_qwen3_5
     from ..milestones.qwen35_text import load_text_tokenizer
 
     os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
+    torch.manual_seed(args.seed)
     tokenizer = load_text_tokenizer(args.model_path)
     model = load_beacon_qwen3_5(args.model_path)  # 从保存的 config 读取 beacon 字段
     model.eval()
@@ -114,27 +139,37 @@ def main() -> None:
     if args.max_questions:
         hp = hp.select(range(args.max_questions))
 
-    print(f"[beacon-eval] {len(hp)} 题 ...", flush=True)
-    results = []
+    completed = {}
+    if args.resume and os.path.exists(args.output_path):
+        with open(args.output_path, "r", encoding="utf-8") as existing_file:
+            for line in existing_file:
+                if line.strip():
+                    row = json.loads(line)
+                    completed[str(row.get("id"))] = row
+    elif os.path.exists(args.output_path):
+        os.remove(args.output_path)
+    print(f"[beacon-eval] 总题数={len(hp)} 已完成={len(completed)}", flush=True)
+    results = list(completed.values())
     pbar = tqdm(hp, desc="eval", ncols=100)
-    for i, ex in enumerate(pbar):
+    for ex in pbar:
+        example_id = str(ex["id"])
+        if example_id in completed:
+            continue
+        started_at = time.time()
         r = run_beacon_agent(model, tokenizer, retriever, ex["question"],
                              max_turns=args.max_turns, topk=args.topk,
-                             max_docs_tokens=args.max_docs_tokens)
-        r["id"] = str(ex["id"]); r["ground_truth"] = str(ex["answer"]).strip()
+                             max_docs_tokens=args.max_docs_tokens,
+                             max_new_tokens_per_turn=args.max_new_tokens_per_turn)
+        r["id"] = example_id
+        r["ground_truth"] = str(ex["answer"]).strip()
+        r["latency_seconds"] = round(time.time() - started_at, 4)
         results.append(r)
+        append_jsonl(args.output_path, r)
         pbar.set_postfix(turns=r["turns"], pred=r["prediction"][:30])
 
-    with open(args.output_path, "w", encoding="utf-8") as f:
-        for r in results:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-    from .em_f1 import compute_metrics
-
-    m = compute_metrics([(r["id"], r["prediction"], r["ground_truth"]) for r in results])
+    m = summarize_results(results)
     mp = os.path.splitext(args.output_path)[0] + "_metrics.json"
-    with open(mp, "w", encoding="utf-8") as f:
-        json.dump(m, f, ensure_ascii=False, indent=2)
+    write_json(mp, {**m, "evaluation_config": vars(args)})
     print(f"[beacon-eval] EM={m['em']:.3f} F1={m['f1']:.3f} -> {args.output_path}")
 
 

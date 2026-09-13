@@ -19,15 +19,26 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any, Dict, List
 
 import torch
 from torch.utils.data import Dataset
 from transformers import Trainer, TrainingArguments
 
+from ..utils.runtime import (
+    count_parameters,
+    load_yaml_config,
+    prepare_run_artifacts,
+    require_keys,
+    resolve_experiment_dir,
+    write_json,
+)
+from ..utils.trainer_callbacks import JsonlMetricsCallback
+
 from ..data.trajectory import (
-    SEARCH_INSTRUCTION,
     build_loss_labels,
+    build_search_chat_prompt,
     build_sequence_ids,
 )
 
@@ -35,7 +46,8 @@ from ..data.trajectory import (
 class NativeSearchSFTDataset(Dataset):
     """把交互式搜索轨迹 jsonl 转成标准 (input_ids, attention_mask, labels)。
 
-    每样本的 chat 前缀来自 ``apply_chat_template(user=SEARCH_INSTRUCTION)``，
+    每样本的 chat 前缀由 ``build_search_chat_prompt`` 统一构造：搜索协议位于
+    system，首个 user 消息只包含问题文本。
     标签只在模型生成片段（think / <search> / <answer>）上计算损失，其余 -100。
     """
 
@@ -55,11 +67,7 @@ class NativeSearchSFTDataset(Dataset):
     def __getitem__(self, idx: int):
         sample = self.samples[idx]
         q = str(sample["question"])
-        chat_input = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": SEARCH_INSTRUCTION.format(question=q)}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        chat_input = build_search_chat_prompt(q, add_generation_prompt=True)
         ids, _regions, gen_spans = build_sequence_ids(
             self.tokenizer, chat_input, sample, max_length=self.max_length
         )
@@ -87,13 +95,15 @@ def collate_for_native(batch: List[Dict[str, torch.Tensor]]):
     return {"input_ids": ids, "attention_mask": attn, "labels": labels}
 
 
-def main_train(config_path: str) -> None:
-    import yaml
-
+def main_train(
+    config_path: str,
+    overrides=(),
+    resume_from_checkpoint: str | None = None,
+) -> None:
     from ..milestones.qwen35_text import load_text_tokenizer
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_yaml_config(config_path, overrides)
+    require_keys(cfg, ("model_name_or_path", "train_data_path", "output_dir", "exp_name"))
 
     tokenizer = load_text_tokenizer(cfg["model_name_or_path"])
     tokenizer.pad_token = tokenizer.eos_token
@@ -105,14 +115,20 @@ def main_train(config_path: str) -> None:
     train_ds = NativeSearchSFTDataset(
         cfg["train_data_path"], tokenizer, max_length=cfg.get("max_length", 8192)
     )
+    eval_ds = None
+    if cfg.get("val_data_path"):
+        eval_ds = NativeSearchSFTDataset(
+            cfg["val_data_path"], tokenizer, max_length=cfg.get("max_length", 8192)
+        )
 
-    exp_dir = os.path.join(cfg["output_dir"], "models", cfg["exp_name"])
-    os.makedirs(exp_dir, exist_ok=True)
+    exp_dir = str(resolve_experiment_dir(cfg))
+    prepare_run_artifacts(exp_dir, cfg, config_path, overrides)
     ckpt_dir = os.path.join(exp_dir, "final")
 
     # 24GB 单卡微调 2B 模型：用 8-bit Adam 优化器 + 梯度检查点以控制显存
     use_8bit = cfg.get("optim", "adamw_torch") == "adamw_bnb_8bit"
-    model.gradient_checkpointing_enable()
+    if cfg.get("gradient_checkpointing", True):
+        model.gradient_checkpointing_enable()
     model.config.use_cache = False
 
     args = TrainingArguments(
@@ -120,10 +136,13 @@ def main_train(config_path: str) -> None:
         per_device_train_batch_size=cfg.get("per_device_batch_size", 1),
         gradient_accumulation_steps=cfg.get("grad_accum_steps", 8),
         learning_rate=cfg.get("learning_rate", 5e-5),
+        lr_scheduler_type=cfg.get("lr_scheduler_type", "linear"),
         weight_decay=cfg.get("weight_decay", 0.01),
+        max_grad_norm=cfg.get("max_grad_norm", 1.0),
         num_train_epochs=cfg.get("num_epochs", 1),
+        max_steps=cfg.get("max_train_steps", -1) or -1,
         warmup_ratio=cfg.get("warmup_ratio", 0.05),
-        logging_steps=cfg.get("log_freq_steps", 5),
+        logging_steps=cfg.get("logging_steps", cfg.get("log_freq_steps", 5)),
         save_steps=cfg.get("save_freq_steps", 200),
         save_total_limit=2,
         save_strategy="steps",
@@ -136,21 +155,50 @@ def main_train(config_path: str) -> None:
         disable_tqdm=False,
         seed=cfg.get("seed", 42),
         logging_first_step=True,
+        include_num_input_tokens_seen=True,
         length_column_name="n_tokens",
+        eval_strategy="steps" if eval_ds is not None else "no",
+        eval_steps=cfg.get("eval_steps", cfg.get("save_freq_steps", 200)),
+        per_device_eval_batch_size=cfg.get("per_device_eval_batch_size", 1),
+        run_name=cfg["exp_name"],
     )
 
     trainer = Trainer(
         model=model,
         args=args,
         train_dataset=train_ds,
+        eval_dataset=eval_ds,
         data_collator=collate_for_native,
+        callbacks=[JsonlMetricsCallback(exp_dir, append=resume_from_checkpoint is not None)],
     )
-    print(f"\n[Qwen3] 开始搜索轨迹 SFT：{len(train_ds)} 样本, 输出到 {exp_dir}\n")
-    trainer.train()
+    parameter_stats = count_parameters(model)
+    write_json(
+        os.path.join(exp_dir, "dataset_summary.json"),
+        {
+            "train_samples": len(train_ds),
+            "eval_samples": len(eval_ds) if eval_ds is not None else 0,
+            **parameter_stats,
+        },
+    )
+    print(
+        f"\n[native-train] 样本={len(train_ds)} 可训练参数="
+        f"{parameter_stats['trainable_parameters'] / 1e6:.2f}M 输出={exp_dir}\n",
+        flush=True,
+    )
+    started_at = time.time()
+    train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
-    model.save_pretrained(ckpt_dir)
+    trainer.save_model(ckpt_dir)
     tokenizer.save_pretrained(ckpt_dir)
-    print(f"[Qwen3] 已保存最终模型 -> {ckpt_dir}")
+    summary = {
+        "total_steps": trainer.state.global_step,
+        "elapsed_seconds": round(time.time() - started_at, 3),
+        "final_model_path": ckpt_dir,
+        "train_metrics": train_result.metrics,
+        **parameter_stats,
+    }
+    write_json(os.path.join(exp_dir, "train_summary.json"), summary)
+    print(f"[native-train] 已保存最终模型 -> {ckpt_dir}", flush=True)
 
 
 if __name__ == "__main__":
@@ -158,5 +206,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Qwen3.5 原生搜索轨迹 SFT")
     parser.add_argument("--config", type=str, required=True)
+    parser.add_argument(
+        "--set", dest="overrides", action="append", default=[],
+        help="覆盖 YAML 参数，可重复，例如 --set learning_rate=1e-5",
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint", type=str, default=None,
+        help="Trainer checkpoint 路径；原生训练支持完整断点续训",
+    )
     args = parser.parse_args()
-    main_train(args.config)
+    main_train(args.config, args.overrides, args.resume_from_checkpoint)

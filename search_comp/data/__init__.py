@@ -9,7 +9,10 @@ from .sft_dataset import BeaconDataCollator, BeaconSFTDataset
 from .interactive_dataset import InteractiveCollator, InteractiveSFTDataset
 from .searchr1_dataset import SearchR1Collator, SearchR1SFTDataset
 from .trajectory import (
+    BASE_SYSTEM_PROMPT,
     SEARCH_INSTRUCTION,
+    SYSTEM_PROMPT,
+    build_search_chat_prompt,
     build_sequence_ids,
     extract_search_query,
     format_information_block,
@@ -26,6 +29,9 @@ __all__ = [
     "SearchR1SFTDataset",
     "SearchR1Collator",
     "SEARCH_INSTRUCTION",
+    "BASE_SYSTEM_PROMPT",
+    "SYSTEM_PROMPT",
+    "build_search_chat_prompt",
     "build_sequence_ids",
     "extract_search_query",
     "format_information_block",

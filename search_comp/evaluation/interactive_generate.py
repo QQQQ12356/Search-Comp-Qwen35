@@ -27,7 +27,7 @@ from ..data.build_sft_data import truncate_docs_by_tokens
 from ..data.trajectory import (
     INFO_PREFIX,
     INFO_SUFFIX,
-    SEARCH_INSTRUCTION,
+    build_search_chat_prompt,
     extract_search_query,
 )
 from ..models.model_loader import load_model, load_tokenizer
@@ -65,11 +65,7 @@ def run_interactive_agent(
     if not question.endswith("?"):
         question += "?"
 
-    chat_prefix_text = tokenizer.apply_chat_template(
-        [{"role": "user", "content": SEARCH_INSTRUCTION.format(question=question)}],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
+    chat_prefix_text = build_search_chat_prompt(question, add_generation_prompt=True)
     context_ids = tokenizer(chat_prefix_text, add_special_tokens=False).input_ids
     regions: List[tuple] = []
     queries: List[str] = []
