@@ -7,8 +7,8 @@
 语义（与参考实现 [[beacon_qwen2]] / [[beacon_memory]] 完全一致）：
 
 - **只压缩检索内容**：由 ``regions``（各 ``<information>`` 块 token 区间）指定，
-  文档块按 ``beacon_window`` 切窗，每窗末尾追加 ``window // beacon_ratio`` 个
-  beacon，beacon K/V 进入持久缓存，原始文档 K/V 丢弃。
+  按 ``beacon_window`` 分 chunk；append 在末尾追加 beacon，intersect 在 chunk
+  内每 ``beacon_ratio`` 个 token 后插入一个 beacon。chunk 结束仅缓存 beacon。
 - **损失不含检索内容**：labels 全局预移位后，文档与 beacon 位置为 -100，
   只在模型生成片段（think / <search> / <answer>）上计算损失。
 - **混合层都只提交 Beacon 载体**：full_attention 层只持久化 beacon K/V；
@@ -34,7 +34,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
 )
 
 from .beacon_config import BeaconConfig
-from .modeling_utils import cat_tensor, slice_tensor
+from .modeling_utils import beacon_intersect_order, cat_tensor, slice_tensor
 
 
 class BeaconLinearStateWriter(nn.Module):
@@ -362,6 +362,13 @@ class _Qwen3BeaconMemory:
         else:
             self._step_beacon_indices = None
 
+        if beacon_size > 0 and self.beacon.beacon_pos == "intersect":
+            order = beacon_intersect_order(end - start, self.beacon.beacon_ratio, self._device)
+            input_ids = input_ids[:, order]
+            self._step_beacon_indices = self._step_beacon_indices[order]
+            if labels is not None:
+                labels = labels[:, order]
+
         # past：full-attn 层 4 元组
         mem_size = 0
         past = []
@@ -579,11 +586,16 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
             else:
                 previous_recurrent = self._mem._linear_recurrent.get(idx)
                 previous_conv = self._mem._linear_conv.get(idx)
+                reader_initial_recurrent = previous_recurrent
+                reader_initial_conv = previous_conv
+                if self._mem._store == "beacon":
+                    reader_initial_recurrent = previous_recurrent.clone() if previous_recurrent is not None else None
+                    reader_initial_conv = previous_conv.clone() if previous_conv is not None else None
                 out, reader_recurrent, reader_conv = self._linear_attention_forward(
                     layer.linear_attn,
                     hidden,
-                    previous_recurrent,
-                    previous_conv,
+                    reader_initial_recurrent,
+                    reader_initial_conv,
                 )
             hidden = residual + out
             residual = hidden

@@ -171,6 +171,42 @@ linear attention 两类层：
 
 `enable_beacon=False` 退化为原生 `Qwen3_5ForCausalLM` 前向。
 
+### Beacon 交错布局
+
+训练 YAML 的 `beacon.beacon_pos` 支持 `append`（默认，窗口末尾追加）和
+`intersect`（检索内容内部交错）。例如：
+
+```yaml
+beacon:
+  beacon_pos: "intersect"
+  beacon_window: 256
+  beacon_stride: 256
+  beacon_ratio: 32
+  beacon_attn: "full-coverage"
+```
+
+在现有配置中修改这些字段即可，其他字段保持不变。文档先按 `beacon_window`
+个原始 token 分 chunk，每个 chunk 内每 `beacon_ratio` 个原始 token 插入一个
+Beacon，末尾不足 ratio 个 token 也生成一个。上述配置每个完整 chunk 有 256 个
+原始 token 和 8 个 Beacon，布局为 `token1…32 → B1 → token33…64 → B2 → …`。
+
+chunk 内使用完整因果注意力：普通 token 和 Beacon 均可读取当前 chunk 内此前的
+所有普通 token 和 Beacon，因此 B2 可以直接读取 token1…64。自位置保留标准因果
+注意力语义，未来位置不可见。后续 chunk 只能读取前面 chunk 的 Beacon、保留的
+非文档上下文，以及当前 chunk 内本位置之前的 token 和 Beacon，不能直接读取
+前面 chunk 的原始文档 token。
+
+实现逐 chunk 前向，chunk 结束才丢弃原始文档 K/V，仅提交 Beacon K/V。
+Qwen3.5 线性层在 chunk 内保留 reader 状态，chunk 结束仅提交 Beacon writer
+更新的循环状态并清空临时卷积状态。训练与推理共享该布局配置；不再按 ratio
+拆成多次前向，chunk 划分与 `append` 一致。
+
+线性状态隔离：压缩 chunk 的 reader 使用历史 recurrent/conv 状态的独立副本，
+不允许通过原地写入污染持久状态。跨 chunk 的状态矩阵由
+`writer(当前 chunk 的 Beacon 激活, chunk 开始前的持久状态)` 更新，
+绝不提交当前 chunk 的原始 reader 最终状态或卷积尾状态。副本保留训练梯度。
+这里隔离的是原始文档状态的直接传递；Beacon 压缩后携带的文档信息仍会按设计保留。
+
 ---
 
 ## 测试

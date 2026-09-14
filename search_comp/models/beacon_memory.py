@@ -5,11 +5,11 @@
 
 - **keep 片段**（指令、问题、think 推理、search 标签、答案等）：正常前向，
   K/V 全部保留到持久缓存 ``cache``。
-- **compress 片段**（``<information>`` 检索文档块）：按 ``beacon_window``
-  切分成满窗口，每个满窗口末尾追加 ``window // ratio`` 个 beacon token。
+- **compress 片段**（``<information>`` 检索文档块）：append 按 ``beacon_window``
+  切分并追加 beacon；intersect 每 ratio 个 token 后插入一个 beacon。
   beacon 通过自注意力聚合窗口信息，抽取 beacon K/V 保留到 ``cache``，
-  **原始文档 K/V 随即丢弃**（不参与后续解码）；不满一个窗口的尾部
-  token 不压缩，直接进入 ``cache``。
+  **原始文档 K/V 随即丢弃**（不参与后续解码）；尾部不足一片也压缩。
+  intersect 在 chunk 内保留完整因果可见性，chunk 结束后仅缓存 beacon。
 
 交互式搜索（多轮 ``<search>`` → ``<information>``）会产生**多个** compress
 片段，通过 ``regions: List[(start, end)]`` 传入。所有片段按处理顺序依次
@@ -24,7 +24,7 @@ from __future__ import annotations
 import torch
 from typing import List, Optional, Sequence, Tuple
 
-from .modeling_utils import cat_tensor, slice_tensor
+from .modeling_utils import beacon_intersect_order, cat_tensor, slice_tensor
 
 
 class BeaconMemory:
@@ -268,6 +268,14 @@ class BeaconMemory:
         else:
             self._step_beacon_indices = None
 
+        if beacon_size > 0 and self.beacon.beacon_pos == "intersect":
+            order = beacon_intersect_order(end - start, self.beacon.beacon_ratio, self._device)
+            input_ids = input_ids[:, order]
+            attention_mask = attention_mask[:, order]
+            self._step_beacon_indices = self._step_beacon_indices[order]
+            if labels is not None:
+                labels = labels[:, order]
+
         # ---- 构造 past_key_values：past = cache（RoPE 前 K/V，按处理顺序） ----
         past_key_values: List[Tuple] = []
         mem_size = 0
@@ -386,8 +394,8 @@ class BeaconMemory:
         形状 ``(batch, 1, query_len, mem_size + query_len)``：
         - 历史 ``mem_size`` 列全部置 0（可关注）。
         - 当前部分为下三角因果掩码（0=可关注，min_value=屏蔽）。
-        由于 beacon 追加在窗口末尾，因果掩码天然让 beacon 关注窗口内全部 token
-        （full-coverage）。
+        append 的 beacon 关注整个窗口；intersect 的 beacon 关注当前 chunk
+        内此前的全部普通 token 和 beacon。历史缓存不包含已压缩 chunk 的原始 token。
 
         Returns:
             掩码张量。

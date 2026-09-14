@@ -1,23 +1,59 @@
-# 实测可用的环境（conda env: search-comp-qwen3.5, python 3.11, CUDA 12.6）：
-#   torch 2.7.0+cu126 / transformers 5.9.0 / accelerate 1.14.0 / datasets 5.0.1
-# torch 请按本机 CUDA 单独安装，例如：
+# # 实测可用的环境（conda env: search-comp-qwen3.5, python 3.11, CUDA 12.6）：
+# #   torch 2.7.0+cu126 / transformers 5.9.0 / accelerate 1.14.0 / datasets 5.0.1
+# # torch 请按本机 CUDA 单独安装，例如：
+# #   pip install torch==2.7.0 --index-url https://download.pytorch.org/whl/cu126
+# # 再执行 pip install -r requirements.txt。
+
+# # ==== Qwen3.5 核心框架 ====
+# # transformers>=5 才认识 model_type=qwen3_5（4.57 发行版不含）。
+# torch>=2.6.0
+# transformers>=5.9.0,<6
+# accelerate>=1.10.0
+# datasets>=4.0.0
+# huggingface_hub>=0.24.0
+# # 权重读写（transformers 加载 .safetensors 需要）
+# safetensors>=0.4.0
+# protobuf>=4.25.0
+
+# # ==== 训练 ====
+# peft>=0.12.0
+# # 可选：启用 optim=adamw_bnb_8bit 或 Beacon 自动 8-bit AdamW
+# bitsandbytes>=0.45.0; platform_system == "Linux"
+
+# # ==== 检索（在线 BM25） ====
+# rank-bm25>=0.2.2
+
+# # ==== 其他 ====
+# numpy>=1.26
+# pyyaml>=6.0
+# sentencepiece>=0.2.0
+# tqdm>=4.66.0
+
+# # ==== 测试 ====
+# pytest>=8.0
+
+# # ==== 可选：多卡 / 多机训练 ====
+# # 当前脚本与配置均未启用 DeepSpeed（configs/train/ds_config.json 仅为备用），
+# # 单卡训练无需安装；确实需要 ZeRO 时再打开下面这行。
+# # deepspeed>=0.15.0
+# 实测可用的环境（conda env: search-comp-qwen3.5, python 3.11, CUDA 12.6）
+# torch 2.7.0+cu126 / transformers 5.9.0 / accelerate 1.14.0 / datasets 5.0.1
+# torch 请按本机 CUDA 单独安装：
 #   pip install torch==2.7.0 --index-url https://download.pytorch.org/whl/cu126
-# 再执行 pip install -r requirements.txt。
+# 再执行 pip install -r requirements-lock.txt
 
 # ==== Qwen3.5 核心框架 ====
-# transformers>=5 才认识 model_type=qwen3_5（4.57 发行版不含）。
-torch>=2.6.0
-transformers>=5.9.0,<6
-accelerate>=1.10.0
-datasets>=4.0.0
+# transformers>=5 才认识 model_type=qwen3_5（4.57 发行版不含）
+torch==2.7.0
+transformers==5.9.0
+accelerate==1.14.0
+datasets==5.0.1
 huggingface_hub>=0.24.0
-# 权重读写（transformers 加载 .safetensors 需要）
 safetensors>=0.4.0
 protobuf>=4.25.0
 
 # ==== 训练 ====
 peft>=0.12.0
-# 可选：启用 optim=adamw_bnb_8bit 或 Beacon 自动 8-bit AdamW
 bitsandbytes>=0.45.0; platform_system == "Linux"
 
 # ==== 检索（在线 BM25） ====
@@ -33,6 +69,4 @@ tqdm>=4.66.0
 pytest>=8.0
 
 # ==== 可选：多卡 / 多机训练 ====
-# 当前脚本与配置均未启用 DeepSpeed（configs/train/ds_config.json 仅为备用），
-# 单卡训练无需安装；确实需要 ZeRO 时再打开下面这行。
 # deepspeed>=0.15.0

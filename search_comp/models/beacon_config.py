@@ -28,11 +28,11 @@ class BeaconConfig:
     enable_beacon: bool = True
     #: 滑动窗口大小（token 数）。文档区按此大小切分窗口
     beacon_window: int = 1024
-    #: 窗口步长（token 数）。本实现使用 append 模式且 stride == window，无重叠
+    #: 窗口步长（token 数）。窗口无重叠，append 和 intersect 均按 window 分 chunk
     beacon_stride: int = 1024
     #: 压缩率：每多少个原始 token 生成 1 个 beacon。例：64 表示每 64 token -> 1 beacon
     beacon_ratio: int = 64
-    #: beacon 的注意力模式。仅支持 "full-coverage"（beacon 关注窗口内全部 token）
+    #: beacon 的注意力模式。full-coverage 因果地覆盖当前 chunk 中此前的 token
     beacon_attn: str = "full-coverage"
     #: 为 beacon 引入哪些独立投影矩阵，取值 "q"/"k"/"v"/"o" 的任意组合（空格分隔）
     beacon_param: str = "q k v"
@@ -42,7 +42,7 @@ class BeaconConfig:
     beacon_sink_size: int = 0
     #: beacon 是否能关注历史 beacon（跨窗口记忆）
     beacon_attend_prev: bool = True
-    #: beacon 放置方式。仅支持 "append"（beacon 追加在窗口末尾）
+    #: beacon 放置方式：append 在 chunk 末尾追加；intersect 在 chunk 内每 ratio 个 token 插入一个
     beacon_pos: str = "append"
     #: 保留兼容字段；当前 Qwen3.5 窗口状态机统一使用 beacon_ratio
     eval_beacon_ratio: Optional[int] = None
@@ -85,8 +85,8 @@ class BeaconConfig:
                 self.beacon_attn == "full-coverage"
             ), f"当前实现仅支持 full-coverage 注意力模式，收到 {self.beacon_attn}"
             assert (
-                self.beacon_pos == "append"
-            ), f"当前实现仅支持 append 放置模式，收到 {self.beacon_pos}"
+                self.beacon_pos in {"append", "intersect"}
+            ), f"beacon_pos 必须为 append 或 intersect，收到 {self.beacon_pos}"
             valid_params = {"q", "k", "v", "o"}
             for p in self.beacon_param.split():
                 assert p in valid_params, f"beacon_param 含非法投影类型: {p}"

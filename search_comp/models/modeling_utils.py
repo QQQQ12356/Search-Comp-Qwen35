@@ -15,6 +15,19 @@ import torch.nn.functional as F
 from typing import Optional, Tuple
 
 
+def beacon_intersect_order(raw_length: int, ratio: int, device: torch.device) -> torch.Tensor:
+    """将 chunk 末尾的 Beacon 重排到每 ratio 个原始 token 后，尾片也保留 Beacon。"""
+    beacon_size = (raw_length + ratio - 1) // ratio
+    raw_indices = torch.arange(raw_length, device=device)
+    raw_positions = raw_indices + raw_indices // ratio
+    beacon_mask = torch.ones(raw_length + beacon_size, dtype=torch.bool, device=device)
+    beacon_mask[raw_positions] = False
+    order = torch.empty(raw_length + beacon_size, dtype=torch.long, device=device)
+    order[raw_positions] = raw_indices
+    order[beacon_mask] = torch.arange(raw_length, raw_length + beacon_size, device=device)
+    return order
+
+
 # ----------------------------------------------------------------------
 # 损失计算
 # ----------------------------------------------------------------------
