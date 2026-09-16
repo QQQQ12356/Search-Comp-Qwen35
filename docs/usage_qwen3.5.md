@@ -158,8 +158,8 @@ bash scripts/verify_beacon.sh
 |------|------|------|
 | `model_name_or_path` | `Qwen/Qwen3.5-2B` | 基础模型（本地已缓存） |
 | `train_data_path` | 见各 config | 训练数据 JSONL 路径 |
-| `data_mode` | `interactive` | 数据模式：`interactive`（交互式轨迹）/ `searchr1`（Search-R1 messages） |
-| `max_length` | 8192 | 最大 token 数（超出的压缩区/损失区被丢弃） |
+| `data_mode` | 见各 config | 数据模式：`searchr1`（Search-R1 messages）/ `interactive`（交互式轨迹）。native 配置默认 `searchr1`，`beacon_qwen3.5.yaml` 为 `interactive` |
+| `max_length` | 8192 | 最大 token 数（超出的压缩区/损失区被丢弃）；`searchr1` 轨迹不截断，此参数只对 `interactive` 生效 |
 | `learning_rate` | `5.0e-5` | AdamW 学习率 |
 | `weight_decay` | `0.01` | 权重衰减 |
 | `num_epochs` | `1` | 训练轮数 |
@@ -197,12 +197,14 @@ LoRA 相关超参数：
 
 | 参数 | 默认 | 含义 |
 |------|------|------|
-| `per_device_batch_size` | `1` | 每卡 batch（原生 Trainer 可 >1，因统一 padding） |
+| `per_device_batch_size` | `1` | 每卡 batch；`interactive` 可 >1（统一 padding），`searchr1` collator 强制为 1，用 `grad_accum_steps` 扩大有效 batch。注意多卡可见时 DataLoader batch 会 ×GPU 数，单卡请设 `CUDA_VISIBLE_DEVICES=0` |
 | `warmup_ratio` | `0.05` | 学习率预热比例 |
 | `use_bf16` | `true` | 是否 bf16 混合精度 |
 | `log_freq_steps` | `5` | 每多少步打印 loss |
 | `optim` | `adamw_bnb_8bit` | 优化器（8-bit Adam 控显存） |
 | `gradient_checkpointing` | `true` | 梯度检查点（省显存） |
+| `use_lora` | 见各 config | LoRA（冻结基础权重只训适配器）；native 默认 `true`。保存的是 adapter，评测前需 `python -m search_comp.trainer.merge_lora` 合并 |
+| `lora_r` / `lora_alpha` / `lora_dropout` | `16` / `32` / `0.05` | LoRA 秩、缩放与 dropout |
 
 ### 3.3 数据构建超参数（脚本环境变量）
 

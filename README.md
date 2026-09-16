@@ -20,14 +20,23 @@ conda create -n search-comp-qwen3.5 python=3.11 -y
 conda activate search-comp-qwen3.5
 python -m pip install -r requirements.txt
 
-# 2) 不加载模型权重的单元测试（应全绿：24 passed）
+# 2) 不加载模型权重的单元测试（应全绿：66 passed）
 bash scripts/10_test.sh
 
 # 3) 端到端冒烟：探针 -> 训练 -> 评测
 bash scripts/00_searchagent_probe.sh                       # 自动建小语料并探检索能力
 bash scripts/20_native_train.sh configs/train/native_qwen3.5.yaml
-bash scripts/21_native_eval.sh outputs/models/native_qwen3_sft_v1/final
+# LoRA 训练，评测前先把 adapter 合并成完整模型
+python -u -m search_comp.trainer.merge_lora \
+  --base_model_path Qwen/Qwen3.5-2B \
+  --adapter_path outputs/models/native_qwen3_searchr1_v1/final \
+  --output_path outputs/models/native_qwen3_searchr1_v1/final_merged
+bash scripts/21_native_eval.sh outputs/models/native_qwen3_searchr1_v1/final_merged
 ```
+
+> 默认训练数据是 Search-R1 轨迹（约 60MB，需先自行下载，见下文与
+> [`docs/usage_qwen3.5.md`](docs/usage_qwen3.5.md)）。若想跳过下载，用自建交互轨迹：
+> `DATA_MODE=interactive bash scripts/20_native_train.sh configs/train/native_qwen3.5_interactive.yaml`。
 
 > **仓库不含大文件。** `outputs/data/`（语料，约 70MB）、`outputs/models/`
 > （checkpoint）与 `outputs/logs/` 都不入库，分别由训练/评测脚本首次运行自动重建，
@@ -76,7 +85,8 @@ search_comp/
 │   └── modeling_utils.py    # 损失/张量工具（复用）
 ├── data/                    # 数据管线（复用，tokenizer 改为 Qwen3.5）
 ├── trainer/
-│   └── native_trainer.py    # ★ 原生搜索轨迹 SFT（标准 Trainer + 可视化）
+│   ├── native_trainer.py    # ★ 原生搜索轨迹 SFT（标准 Trainer + 可视化）
+│   └── merge_lora.py        # ★ 把原生 LoRA adapter 合并为完整 checkpoint
 ├── evaluation/
 │   ├── native_interactive_eval.py  # ★ 原生交互式 SearchAgent 评估（EM/F1）
 │   └── em_f1.py / evaluate.py      # 指标（复用）
@@ -112,17 +122,31 @@ bash scripts/00_searchagent_probe.sh    # 构建小语料 + 生成轨迹
 
 ## 里程碑 3：原生搜索轨迹 SFT + 评估（完整可用）✅
 
-标准 Trainer（tqdm 进度条 + 实时 loss 可视化）在搜索轨迹上做 SFT：
+标准 Trainer（tqdm 进度条 + 实时 loss 可视化）在搜索轨迹上做 SFT。默认使用
+**Search-R1 官方 messages 轨迹**，与 Beacon 的 `beacon_qwen3.5_searchr1.yaml`
+是同一份数据文件，两条线可直接对比：
 
 ```bash
-# 构建交互式轨迹 + 训练（可视化到终端）
+# 训练（可视化到终端）；LoRA，final/ 保存的是 adapter
 bash scripts/20_native_train.sh configs/train/native_qwen3.5.yaml
-# 交互式 SearchAgent 评估 + EM/F1
-bash scripts/21_native_eval.sh outputs/models/native_qwen3_sft_v1/final
+# 评测前先合并 adapter 为完整模型，再跑交互式 SearchAgent 评估 + EM/F1
+python -u -m search_comp.trainer.merge_lora \
+  --base_model_path Qwen/Qwen3.5-2B \
+  --adapter_path outputs/models/native_qwen3_searchr1_v1/final \
+  --output_path outputs/models/native_qwen3_searchr1_v1/final_merged
+bash scripts/21_native_eval.sh outputs/models/native_qwen3_searchr1_v1/final_merged
 ```
 
-- 8-bit Adam（bitsandbytes）+ 梯度检查点，24GB 单卡可微调 1.88B。
+切回本项目自建的交互式轨迹（`DATA_MODE=interactive`，脚本会自动构建语料与轨迹）：
+
+```bash
+DATA_MODE=interactive bash scripts/20_native_train.sh \
+  configs/train/native_qwen3.5_interactive.yaml
+```
+
+- LoRA + 8-bit Adam（bitsandbytes）+ 梯度检查点，24GB 单卡可微调 1.88B。
 - 已验证端到端：加载文本权重 → 标准 Trainer 训练（train_loss 1.525）→ 保存。
+- Search-R1 轨迹不截断，`max_length` 只对 `data_mode: interactive` 生效。
 
 ---
 

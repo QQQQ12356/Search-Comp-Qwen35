@@ -8,16 +8,22 @@
 
 ```text
 search_comp/
-├── data/                  # 轨迹解析、数据集、collator、BM25 检索
-├── models/                # Qwen3.5 Beacon、配置与模型加载
-├── trainer/               # 标准 Transformers Trainer 训练入口
-├── evaluation/            # 原生/Beacon 交互评测、EM/F1 与统计
+├── data/                  # 轨迹解析、数据集（含 Search-R1）、collator、BM25 检索
+├── models/                # Qwen3.5 Beacon、纯文本 SFT 模型（plain_qwen3）与加载
+├── trainer/               # 标准 Trainer 训练入口（plain_sft_trainer / beacon）
+├── evaluation/            # 交互评测（plain_interactive_eval / beacon）、EM/F1 统计
 ├── milestones/            # 数据探针与 Qwen3.5 文本模型加载
 └── utils/                 # 配置覆盖、运行元数据、JSONL Trainer 日志
 configs/train/             # 可复用 YAML 训练配置
 scripts/                   # 数据、训练、评测、测试、统计入口
 tests/                     # 不下载大模型的单元与小模型回归测试
 ```
+
+无 Beacon 的「纯文本 SFT」线各有一套最小实现，互不影响 Beacon 文件：
+
+- 建模：`search_comp/models/plain_qwen3.py`
+- 训练：`search_comp/trainer/plain_sft_trainer.py` + `configs/train/qwen3.5_plain_sft.yaml`
+- 评测：`search_comp/evaluation/plain_interactive_eval.py`
 
 核心数据协议为：模型生成 `<search>query</search>`，检索器返回
 `<information>...</information>`，模型继续生成并最终输出
@@ -40,11 +46,12 @@ python -m pip install -r requirements.txt
 | 内容 | 位置 | 获取方式 |
 | --- | --- | --- |
 | 基础模型权重 | HF 缓存 | 首次运行时自动从 `Qwen/Qwen3.5-2B` 下载 |
-| HotpotQA 语料 / 交互轨迹 | `outputs/data/` | `scripts/20`、`22`、`23` 首次运行自动构建 |
-| Search-R1 SFT 轨迹 | `outputs/data/searchr1/` | 手动下载，见下 |
+| HotpotQA 语料 / 交互轨迹 | `outputs/data/` | `scripts/21`、`22`、`23` 首次运行自动构建 |
+| Search-R1 SFT 轨迹 | `outputs/data/searchr1/` | 手动下载，见下（`20`/`24` 的输入） |
 | checkpoint / 日志 / 评测结果 | `outputs/models/`、`outputs/logs/`、`outputs/results/` | 训练与评测时生成 |
 
-Search-R1 SFT 轨迹（`24_beacon_train_searchr1.sh` 的输入，约 60MB）下载：
+Search-R1 SFT 轨迹（`20_native_train.sh` 与 `24_beacon_train_searchr1.sh` 的共同输入，
+约 60MB）下载：
 
 ```bash
 mkdir -p outputs/data/searchr1
@@ -74,31 +81,66 @@ FULL_MODEL_TEST=1 CUDA_VISIBLE_DEVICES=0 bash scripts/10_test.sh
 真实模型验证检查：all-keep 数值一致性、full-attention K/V 压缩、线性层不存在
 `DynamicCache` 旁路、压缩边界卷积状态清空以及 Beacon writer recurrent state 存在。
 
-## 4. 原生模型训练
+## 4. 原生 / 纯文本 SFT 训练
 
-默认流程会准备 HotpotQA 小型语料和交互轨迹，再调用标准 Trainer：
+`scripts/20_native_train.sh` 走**纯文本 SFT**（无 Beacon、不压缩）：实现时参考
+Beacon 各为一套建模 / 训练 / 评测文件，但做了最小化脱钩，互不影响 Beacon 文件。
+训练数据是 Search-R1 官方 `messages` 轨迹
+`outputs/data/searchr1/qwen3-4b-instruct-sft.jsonl`（需先按 §2.1 准备），与 Beacon
+训练（`beacon_qwen3.5_searchr1.yaml`）使用**同一份文件**，可直接对比「压缩 vs 不压缩」。
+
+直接调用标准 Trainer：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/20_native_train.sh \
-  configs/train/native_qwen3.5.yaml
+  configs/train/qwen3.5_plain_sft.yaml
 ```
 
 无需编辑 YAML 即可覆盖参数：
 
 ```bash
-bash scripts/20_native_train.sh configs/train/native_qwen3.5.yaml \
+bash scripts/20_native_train.sh configs/train/qwen3.5_plain_sft.yaml \
   --set learning_rate=1e-5 \
   --set max_train_steps=100 \
-  --set exp_name=native_smoke
+  --set exp_name=plain_smoke
 ```
 
-原生 Trainer checkpoint 可使用 Python 入口恢复：
+### train / eval 严格对齐
+
+评测（`build_search_chat_prompt`）的初始上下文是
+`system = 角色说明 + 完整搜索协议`、`user = 裸问题`；而 Search-R1 官方数据原本把
+搜索协议塞在首个 user。plain 与 Beacon 的 Search-R1 训练共用
+`SearchR1SFTDataset`，装载时会**把协议移进 system、首个 user 只留裸问题**，使训练
+看到的提示与评测逐字一致（见 `_align_to_eval_prompt`）。对齐只改输入上下文，
+loss 掩码不变——system/user 仍为 `-100`，只有 assistant 输出（think / search /
+answer）计损失。
+
+Search-R1 轨迹**不截断**，collator 固定 `batch_size=1`，靠 `grad_accum_steps`
+扩大有效 batch。
+
+原生 Trainer checkpoint 可使用 Python 入口恢复（注意 `CUDA_VISIBLE_DEVICES`：
+不指定时 Trainer 会把可见 GPU 全部用上并把 batch 放大，searchr1 的 collator 只接受 1）：
 
 ```bash
-python -u -m search_comp.trainer.native_trainer \
-  --config configs/train/native_qwen3.5.yaml \
-  --resume_from_checkpoint outputs/models/native_qwen3_sft_v1/checkpoint-200
+CUDA_VISIBLE_DEVICES=0 python -u -m search_comp.trainer.plain_sft_trainer \
+  --config configs/train/qwen3.5_plain_sft.yaml \
+  --resume_from_checkpoint outputs/models/qwen35_plain_sft_v1/checkpoint-1000
 ```
+
+### LoRA 与合并
+
+`use_lora: true`（默认）时冻结基础权重，只训练低秩适配器，`final/` 保存的是
+adapter。评测入口加载的是完整模型，因此**评测前必须合并**：
+
+```bash
+python -u -m search_comp.trainer.merge_lora \
+  --base_model_path Qwen/Qwen3.5-2B \
+  --adapter_path outputs/models/qwen35_plain_sft_v1/final \
+  --output_path outputs/models/qwen35_plain_sft_v1/final_merged
+```
+
+合并默认在 CPU 上进行，不需要额外预留 GPU 显存。中间的
+`checkpoint-*` 目录同样是 adapter，可按需合并任意一个。
 
 ## 5. Beacon 模型训练
 
@@ -175,14 +217,18 @@ adapter，可直接使用 `final_adapter`，跳过合并阶段。
 
 ## 7. 交互式评测
 
-原生模型：
+原生 / 纯文本模型（`scripts/21_native_eval.sh` → `search_comp.evaluation.plain_interactive_eval`，
+LoRA 训练时传**合并后**的目录，见 §4）：
 
 ```bash
 MAX_QUESTIONS=200 CUDA_VISIBLE_DEVICES=0 \
   bash scripts/21_native_eval.sh \
-  outputs/models/native_qwen3_sft_v1/final \
-  outputs/results/native_qwen3_sft_v1/predictions.jsonl
+  outputs/models/qwen35_plain_sft_v1/final_merged \
+  outputs/results/qwen35_plain_sft_v1/predictions.jsonl
 ```
+
+评测使用与训练严格对齐的同一提示词（`system` 含完整搜索协议、`user` 为裸问题），
+真实 BM25 检索 + 多轮 `think → <search> → <information> → <answer>`，生成时不做任何压缩。
 
 Beacon 模型：
 
@@ -206,7 +252,7 @@ RESUME=1 bash scripts/23_beacon_eval.sh MODEL_PATH RESULT_PATH
 
 ```bash
 bash scripts/25_summarize_results.sh outputs/results/comparison.json \
-  outputs/results/native_qwen3_sft_v1/predictions.jsonl \
+  outputs/results/qwen35_plain_sft_v1/predictions.jsonl \
   outputs/results/beacon_qwen3_searchr1_v3/predictions.jsonl
 ```
 

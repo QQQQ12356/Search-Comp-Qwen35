@@ -1,37 +1,35 @@
 #!/usr/bin/env bash
-# Qwen3.5 原生搜索轨迹 SFT（标准 Trainer + tqdm 可视化）。
-# 1) 构建交互式搜索轨迹数据；2) 标准 Trainer 训练并可视化到终端。
+# Qwen3.5 纯文本 SFT 训练（标准 Trainer + tqdm 可视化，无 Beacon、不压缩）。
+# 数据：Search-R1 官方 messages 轨迹（与 beacon_qwen3.5_searchr1.yaml 使用
+# 同一份文件，但这里不挂任何压缩参数，可直接对比压缩 vs 不压缩）。
+# 训练器：search_comp.trainer.plain_sft_trainer
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 PYTHON_BIN=$(resolve_python)
 
-CONFIG=${1:-configs/train/native_qwen3.5.yaml}
+CONFIG=${1:-configs/train/qwen3.5_plain_sft.yaml}
 if [[ $# -gt 0 ]]; then shift; fi
-MODEL=${MODEL:-Qwen/Qwen3.5-2B}
-CORPUS=${CORPUS:-outputs/data/hotpotqa_corpus.jsonl}
-CORPUS_SPLIT=${CORPUS_SPLIT:-train,validation}
-CORPUS_PER_SPLIT=${CORPUS_PER_SPLIT:-5000}
-TRAIN_DATA=${TRAIN_DATA:-outputs/data/hotpotqa_train_interactive.jsonl}
-TOP_K=${TOP_K:-3}
-MAX_TRAIN=${MAX_TRAIN:-2000}
-MAX_DOCS_TOKENS=${MAX_DOCS_TOKENS:-1024}
-MAX_LENGTH=${MAX_LENGTH:-8192}
+SEARCHR1_DATA=${SEARCHR1_DATA:-outputs/data/searchr1/qwen3-4b-instruct-sft.jsonl}
 
 mkdir -p outputs/data outputs/models
 
-echo "[native] 语料（不存在则构建）: $CORPUS"
-if [ ! -f "$CORPUS" ]; then
-  "$PYTHON_BIN" -u -m search_comp.milestones.build_small_corpus \
-      --output_path "$CORPUS" --splits "$CORPUS_SPLIT" --max_per_split "$CORPUS_PER_SPLIT"
+echo "[plain-sft] 训练数据: $SEARCHR1_DATA"
+if [ ! -f "$SEARCHR1_DATA" ]; then
+  cat >&2 <<EOF
+[plain-sft] 未找到 $SEARCHR1_DATA（Search-R1 SFT 轨迹约 60MB，不在本仓库内）。
+[plain-sft] 先下载：
+  mkdir -p outputs/data/searchr1
+  huggingface-cli download --repo-type dataset PeterJinGo/nq_hotpotqa_train \\
+      --include '*instruct-sft.jsonl' --local-dir outputs/data/searchr1
+[plain-sft] 或复用本地已有文件（避免重复下载）：
+  mkdir -p outputs/data/searchr1
+  ln -s /path/to/qwen3-4b-instruct-sft.jsonl $SEARCHR1_DATA
+EOF
+  exit 1
 fi
 
-echo "[native] 构建交互式搜索轨迹 -> $TRAIN_DATA"
-"$PYTHON_BIN" -u -m search_comp.data.build_interactive_data \
-    --corpus_path "$CORPUS" --output_path "$TRAIN_DATA" --split train \
-    --topk "$TOP_K" --max_questions "$MAX_TRAIN" --max_docs_tokens "$MAX_DOCS_TOKENS"
-
-echo "[native] 开始训练（标准 Trainer，可视化到终端）"
-LOG_PATH=${LOG_PATH:-$(new_log_path native_train)}
+echo "[plain-sft] 开始训练（标准 Trainer，可视化到终端）"
+LOG_PATH=${LOG_PATH:-$(new_log_path plain_train)}
 run_logged "$LOG_PATH" env CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
-    "$PYTHON_BIN" -u -m search_comp.trainer.native_trainer --config "$CONFIG" "$@"
-echo "[native] 训练完成"
+    "$PYTHON_BIN" -u -m search_comp.trainer.plain_sft_trainer --config "$CONFIG" "$@"
+echo "[plain-sft] 训练完成"

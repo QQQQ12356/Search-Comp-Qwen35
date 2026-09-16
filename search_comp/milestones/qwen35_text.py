@@ -66,6 +66,26 @@ def load_text_causal_model(
     )
 
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
+
+    # 已经是纯文本 checkpoint（原生 SFT 保存的 Qwen3_5ForCausalLM）时没有
+    # text_config，直接加载即可——否则下面的权重重映射无从谈起。
+    if not hasattr(config, "text_config"):
+        # Beacon checkpoint 同样是纯文本布局（beacon 超参写在 config 里），
+        # 但它必须经 load_beacon_qwen3_5 重建压缩参数；在此放行会静默丢弃
+        # 训练好的 beacon 权重，得到一个「看起来正常」的无压缩模型。
+        if "BeaconQwen3_5ForCausalLM" in (getattr(config, "architectures", None) or []):
+            raise ValueError(
+                f"{model_name_or_path} 是 Beacon checkpoint，请用 "
+                "search_comp.models.beacon_qwen3.load_beacon_qwen3_5 加载。"
+            )
+        model = Qwen3_5ForCausalLM.from_pretrained(
+            model_name_or_path,
+            torch_dtype=torch_dtype,
+            device_map=device_map,
+            trust_remote_code=trust_remote_code,
+        )
+        return model.eval()
+
     text_config = config.text_config
 
     # 构造纯文本模型

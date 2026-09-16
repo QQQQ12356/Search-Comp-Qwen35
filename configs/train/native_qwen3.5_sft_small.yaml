@@ -2,6 +2,7 @@
 # 数据：交互式搜索轨迹（think → <search> → <information> → <answer>）
 # 目标：验证 SFT 是否教会模型收敛到 </answer>（base 2B 只搜不答）。
 model_name_or_path: "Qwen/Qwen3.5-2B"
+data_mode: "interactive"
 train_data_path: "outputs/data/hotpotqa_train_interactive_sft.jsonl"
 max_length: 8192
 per_device_batch_size: 1

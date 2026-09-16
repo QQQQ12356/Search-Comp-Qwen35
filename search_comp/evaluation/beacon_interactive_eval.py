@@ -36,7 +36,7 @@ from .em_f1 import extract_answer
 from .statistics import summarize_results
 from ..utils.runtime import append_jsonl, write_json
 
-#: 模型未闭合 <answer>...</answer> 时的占位答案（按协议视为未作答，而非整段轨迹兜底）
+# 模型未闭合 <answer>...</answer> 时的占位答案（按协议视为未作答，而非整段轨迹兜底）
 NO_ANSWER = "[无作答]"
 
 

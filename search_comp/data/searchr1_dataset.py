@@ -45,7 +45,7 @@ import torch
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer
 
-from .trajectory import INFO_PREFIX, INFO_SUFFIX
+from .trajectory import INFO_PREFIX, INFO_SUFFIX, SEARCH_INSTRUCTION, SYSTEM_PROMPT
 
 #: 训练数据不在仓库内时的获取提示（拼进报错信息，方便新用户自助解决）。
 SEARCH_R1_DATA_HINT = (
@@ -62,6 +62,41 @@ _INFO_MARKER = "<information>"
 _SEARCH_PATTERN = re.compile(r"<search>")
 _ANSWER_PATTERN = re.compile(r"<answer>")
 _INFORMATION_PATTERN = re.compile(r"\s*<information>(.*?)</information>\s*", re.DOTALL)
+
+
+def _align_to_eval_prompt(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """把 Search-R1 官方提示词对齐到评测的 ``build_search_chat_prompt``。
+
+    评测（``search_comp.data.trajectory.build_search_chat_prompt``）的初始上下文是：:
+
+         system = BASE + 完整搜索协议  |  user = 裸问题
+
+    而 Search-R1 官方轨迹数据正好相反：system 只有角色说明，搜索协议被塞进首个
+    user 消息（``SEARCH_INSTRUCTION + " Question: <q>?"``）。为了让**训练看到的提示
+    与评测完全一致**（train/eval 严格对齐），本函数在装载时改写：
+
+    1. system 内容改为 ``SYSTEM_PROMPT``（角色说明 + ``\\n\\n`` + 完整协议）。
+    2. 首个 user 剥离协议前缀，只保留裸问题。
+
+    已对全量数据校验：首个 user 恒以 ``SEARCH_INSTRUCTION`` 开头，其后紧随
+    ``Question: ``。改写只影响输入上下文，不影响 loss（system/user 本就以 -100 掩码）。
+
+    Returns:
+        改写后的 messages 列表（改动处返回新 dict，不改并入参）。
+    """
+    if not messages or messages[0].get("role") != "system":
+        return messages
+    result = [dict(messages[0], content=SYSTEM_PROMPT)]
+    if len(messages) > 1 and messages[1].get("role") == "user":
+        question = messages[1]["content"]
+        if question.startswith(SEARCH_INSTRUCTION):
+            question = question[len(SEARCH_INSTRUCTION):]
+        question = question.strip().removeprefix("Question:").strip()
+        result.append(dict(messages[1], content=question))
+        result.extend(messages[2:])
+    else:
+        result.extend(messages[1:])
+    return result
 
 
 class SearchR1SFTDataset(Dataset):
@@ -88,6 +123,8 @@ class SearchR1SFTDataset(Dataset):
                         # 规范化：若整行已是 dict 且含 "messages"
                         if "messages" not in obj:
                             raise ValueError(f"缺少 messages 字段: {line[:80]}")
+                        # 训练/评测严格对齐：把协议移进 system、首个 user 只留裸问题。
+                        obj["messages"] = _align_to_eval_prompt(obj["messages"])
                         self.samples.append(obj)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"加载数据 {data_path} 失败: {exc}") from exc
