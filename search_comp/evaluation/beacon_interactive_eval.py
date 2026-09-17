@@ -48,18 +48,22 @@ def run_beacon_agent(model, tokenizer, retriever, question, max_turns=3, topk=3,
 
     chat_prefix = build_search_chat_prompt(question, add_generation_prompt=True)
     context_ids = tokenizer(chat_prefix, add_special_tokens=False).input_ids
+    pending_ids = context_ids
+    pending_regions: List[tuple] = []
+    reuse_cache = False
     regions: List[tuple] = []
     queries: List[str] = []
     turns = 0
 
     device = next(model.parameters()).device
     for _ in range(max_turns):
-        ids = torch.tensor([context_ids], dtype=torch.long, device=device)
-        attn = torch.ones(1, len(context_ids), dtype=torch.long, device=device)
+        ids = torch.tensor([pending_ids], dtype=torch.long, device=device)
+        attn = torch.ones(1, len(pending_ids), dtype=torch.long, device=device)
         gen_ids = model.beacon_generate(
-            input_ids=ids, attention_mask=attn, regions=regions,
+            input_ids=ids, attention_mask=attn, regions=pending_regions,
             max_new_tokens=max_new_tokens_per_turn,
             stop_texts=["</search>", "</answer>"], tokenizer=tokenizer,
+            reuse_cache=reuse_cache,
         )
         gen_tokens = gen_ids[0].tolist()
         gen_text = tokenizer.decode(gen_tokens, skip_special_tokens=False)
@@ -81,6 +85,9 @@ def run_beacon_agent(model, tokenizer, retriever, question, max_turns=3, topk=3,
             docs_start = len(context_ids) + len(ip)
             context_ids = context_ids + ip + di + isuf
             regions.append((docs_start, docs_start + len(di)))
+            pending_ids = ip + di + isuf
+            pending_regions = [(len(ip), len(ip) + len(di))]
+            reuse_cache = True
         else:
             break
 

@@ -751,15 +751,26 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         )
         return self.model.rotary_emb(ref, pos_ids)
 
-    def prefill_and_get_cache(self, input_ids, regions, return_last_logits=False):
+    def prefill_and_get_cache(self, input_ids, regions, return_last_logits=False,
+                              reuse_cache=False):
         """把整条上下文（question + 各检索文档块）编码为 beacon K/V。
+
+        ``reuse_cache=True`` 时保留已有持久状态，只处理新增的 ``input_ids``；
+        此时 ``regions`` 使用相对于新增输入的 token 区间。
 
         Returns:
             ``return_last_logits=False`` 时返回 :class:`_Qwen3BeaconMemory`（其
             ``_cache`` / ``_linear_recurrent`` / ``_linear_conv`` 已就绪）；``True`` 时返回
             ``(memory, last_logits)``。
         """
-        self._mem = _Qwen3BeaconMemory(self, self.beacon_config)
+        if reuse_cache:
+            if not hasattr(self, "_mem"):
+                raise ValueError("复用缓存前必须先执行首次 prefill")
+            self._mem._pos = 0
+            self._mem._seg_idx = 0
+            self._mem._segments = []
+        else:
+            self._mem = _Qwen3BeaconMemory(self, self.beacon_config)
         self._mem.prepare(input_ids, None, regions)
 
         last_logits = None
@@ -805,11 +816,13 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
     def beacon_generate(self, input_ids, attention_mask=None, regions=None,
                         compress_start=None, compress_end=None, max_new_tokens=256,
                         do_sample=False, temperature=1.0, top_p=1.0,
-                        eos_token_ids=None, stop_texts=None, tokenizer=None):
+                        eos_token_ids=None, stop_texts=None, tokenizer=None,
+                        reuse_cache=False):
         """Beacon 模式生成：先编码上下文为 beacon K/V，再自回归生成答案。
 
         参数与参考 :meth:`beacon_qwen2.beacon_generate` 一致；``regions`` 指定
         各 ``<information>`` 检索文档块，其余（question/模板尾部/生成）为 keep。
+        ``reuse_cache=True`` 时只传入新增输入和相对压缩区，接续已有缓存生成。
         """
         if regions is None and compress_start is not None and compress_end is not None:
             regions = [(int(compress_start), int(compress_end))]
@@ -822,14 +835,17 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
             with torch.no_grad():
                 return self._beacon_generate_loop(
                     input_ids, regions, max_new_tokens, do_sample, temperature, top_p,
-                    eos_token_ids, stop_texts, tokenizer,
+                    eos_token_ids, stop_texts, tokenizer, reuse_cache,
                 )
         finally:
             self.train(was_training)
 
     def _beacon_generate_loop(self, input_ids, regions, max_new_tokens, do_sample,
-                              temperature, top_p, eos_token_ids, stop_texts, tokenizer):
-        _mem, logits = self.prefill_and_get_cache(input_ids, regions, return_last_logits=True)
+                              temperature, top_p, eos_token_ids, stop_texts, tokenizer,
+                              reuse_cache=False):
+        _mem, logits = self.prefill_and_get_cache(
+            input_ids, regions, return_last_logits=True, reuse_cache=reuse_cache
+        )
         eos = eos_token_ids if eos_token_ids is not None else [self.config.eos_token_id]
         generated = []
 
@@ -851,6 +867,7 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
                 next_token = torch.argmax(logits, dim=-1, keepdim=True)
 
             generated.append(next_token)
+            logits = self.decode_step(next_token)
             if next_token.item() in eos:
                 break
             if stop_texts and tokenizer is not None:
@@ -859,8 +876,6 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
                 )
                 if any(st in gen_text for st in stop_texts):
                     break
-
-            logits = self.decode_step(next_token)
 
         if not generated:
             return torch.empty((1, 0), dtype=torch.long, device=input_ids.device)

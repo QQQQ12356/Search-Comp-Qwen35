@@ -1,4 +1,5 @@
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
@@ -273,3 +274,104 @@ def test_reader_state_copy_preserves_cross_chunk_writer_gradients(beacon_pos):
         assert state.grad is not None
         assert torch.isfinite(state.grad).all()
         assert state.grad.abs().sum() > 0
+
+
+def _assert_memory_close(actual, expected):
+    for actual_layer, expected_layer in zip(actual._cache, expected._cache):
+        for actual_tensor, expected_tensor in zip(actual_layer, expected_layer):
+            if expected_tensor is None:
+                assert actual_tensor is None
+            else:
+                torch.testing.assert_close(actual_tensor, expected_tensor)
+    for state_name in ("_linear_recurrent", "_linear_conv"):
+        actual_states = getattr(actual, state_name)
+        expected_states = getattr(expected, state_name)
+        assert actual_states.keys() == expected_states.keys()
+        for layer_idx in expected_states:
+            torch.testing.assert_close(actual_states[layer_idx], expected_states[layer_idx])
+
+
+@torch.no_grad()
+@pytest.mark.parametrize("beacon_pos", ["append", "intersect"])
+def test_incremental_retrieval_matches_full_history_prefill(beacon_pos):
+    torch.manual_seed(7)
+    model = _tiny_model(beacon_pos)
+    reference = _tiny_model(beacon_pos)
+    reference.load_state_dict(model.state_dict())
+    history = torch.tensor([[10, 11, 12]])
+    regions = []
+    memory = model.prefill_and_get_cache(history, regions)
+
+    for document_length in (9, 0, 3):
+        generated = torch.tensor([[30, 31]])
+        for token in generated.unbind(dim=1):
+            model.decode_step(token.unsqueeze(1))
+        history = torch.cat([history, generated], dim=1)
+        addition = torch.tensor([[32] + list(range(40, 40 + document_length)) + [60, 61]])
+        regions.append((history.shape[1] + 1, history.shape[1] + 1 + document_length))
+        history = torch.cat([history, addition], dim=1)
+        with patch.object(model, "_native_forward", wraps=model._native_forward) as forward:
+            actual_memory, actual_logits = model.prefill_and_get_cache(
+                addition, [(1, 1 + document_length)], return_last_logits=True,
+                reuse_cache=True,
+            )
+        assert actual_memory is memory
+        processed_tokens = sum(call.args[0].shape[1] for call in forward.call_args_list)
+        assert processed_tokens == addition.shape[1] + (document_length + 1) // 2
+        expected_memory, expected_logits = reference.prefill_and_get_cache(
+            history, regions, return_last_logits=True,
+        )
+        _assert_memory_close(actual_memory, expected_memory)
+        torch.testing.assert_close(actual_logits, expected_logits)
+
+    fresh = torch.tensor([[70, 71]])
+    actual_memory, actual_logits = model.prefill_and_get_cache(fresh, [], return_last_logits=True)
+    expected_memory, expected_logits = reference.prefill_and_get_cache(fresh, [], return_last_logits=True)
+    assert actual_memory is not memory
+    _assert_memory_close(actual_memory, expected_memory)
+    torch.testing.assert_close(actual_logits, expected_logits)
+
+
+@torch.no_grad()
+@pytest.mark.parametrize("beacon_pos", ["append", "intersect"])
+@pytest.mark.parametrize("stop_kind", ["eos", "text", "limit"])
+def test_generation_commits_final_token_before_cache_reuse(beacon_pos, stop_kind):
+    torch.manual_seed(7)
+    model = _tiny_model(beacon_pos)
+    ids = torch.tensor([[10, 11, 20, 21, 22, 23, 24, 30]])
+    regions = [(2, 7)]
+    _, initial_logits = model.prefill_and_get_cache(ids, regions, return_last_logits=True)
+    eos_ids = [initial_logits.argmax(dim=-1).item()] if stop_kind == "eos" else []
+    tokenizer = SimpleNamespace(
+        decode=lambda tokens, **kwargs: "</search>" if len(tokens) >= 2 else "search",
+    )
+    generated = model.beacon_generate(
+        ids, regions=regions, max_new_tokens=3, eos_token_ids=eos_ids,
+        stop_texts=["</search>"] if stop_kind == "text" else None, tokenizer=tokenizer,
+    )
+    assert generated.shape[1] == {"eos": 1, "text": 2, "limit": 3}[stop_kind]
+    generated_memory = model._mem
+    expected_memory = model.prefill_and_get_cache(torch.cat([ids, generated], dim=1), regions)
+    _assert_memory_close(generated_memory, expected_memory)
+
+    model._mem = generated_memory
+    addition = torch.tensor([[31, 40, 41, 42, 43, 44, 32]])
+    next_generated = model.beacon_generate(
+        addition, regions=[(1, 6)], reuse_cache=True, max_new_tokens=2, eos_token_ids=[],
+    )
+    incremental_memory = model._mem
+    assert incremental_memory is generated_memory
+    full_history = torch.cat([ids, generated, addition], dim=1)
+    offset = ids.shape[1] + generated.shape[1]
+    expected_generated = model.beacon_generate(
+        full_history, regions=regions + [(offset + 1, offset + 6)],
+        max_new_tokens=2, eos_token_ids=[],
+    )
+    torch.testing.assert_close(next_generated, expected_generated)
+    _assert_memory_close(incremental_memory, model._mem)
+
+
+def test_cache_reuse_requires_initial_prefill():
+    model = _tiny_model()
+    with pytest.raises(ValueError, match="首次 prefill"):
+        model.prefill_and_get_cache(torch.tensor([[10]]), [], reuse_cache=True)
