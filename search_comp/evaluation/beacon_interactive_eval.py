@@ -168,6 +168,7 @@ def main() -> None:
                              max_docs_tokens=args.max_docs_tokens,
                              max_new_tokens_per_turn=args.max_new_tokens_per_turn)
         r["id"] = example_id
+        r["question"] = str(ex["question"]).strip()
         r["ground_truth"] = str(ex["answer"]).strip()
         r["latency_seconds"] = round(time.time() - started_at, 4)
         results.append(r)

@@ -91,6 +91,7 @@ def main() -> None:
             verbosity=0,
         )
         r["id"] = example_id
+        r["question"] = str(ex["question"]).strip()
         r["ground_truth"] = str(ex["answer"]).strip()
         r["latency_seconds"] = round(time.time() - started_at, 4)
         regions = r.get("regions", [])
