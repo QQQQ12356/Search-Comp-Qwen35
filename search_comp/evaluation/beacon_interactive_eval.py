@@ -178,7 +178,13 @@ def main() -> None:
     m = summarize_results(results)
     mp = os.path.splitext(args.output_path)[0] + "_metrics.json"
     write_json(mp, {**m, "evaluation_config": vars(args)})
-    print(f"[beacon-eval] EM={m['em']:.3f} F1={m['f1']:.3f} -> {args.output_path}")
+    print(
+        f"[beacon-eval] 总体 EM={m['overall_em']:.3f} F1={m['overall_f1']:.3f} | "
+        f"格式正确率 {m['format_correct_rate']:.0%} "
+        f"(子集 EM={m['formatted_em']:.3f} F1={m['formatted_f1']:.3f}) | "
+        f"平均轮次 {m['average_turns']:.2f} 分布 {m['turns_histogram']}"
+    )
+    print(f"[beacon-eval] 结果 -> {args.output_path}\n[beacon-eval] 指标 -> {mp}")
 
 
 if __name__ == "__main__":

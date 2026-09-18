@@ -108,11 +108,20 @@ def main() -> None:
     write_json(metric_path, {**metrics, "evaluation_config": vars(args)})
 
     print(f"\n=== 结果 ===")
-    print(f"EM={metrics['em']:.3f}  F1={metrics['f1']:.3f}  (valid={metrics.get('valid_count')})")
+    print(
+        f"总体: EM={metrics['overall_em']:.3f}  F1={metrics['overall_f1']:.3f}  "
+        f"(samples={metrics['samples']})"
+    )
+    print(
+        f"格式正确: {metrics['format_correct_samples']}/{metrics['samples']} "
+        f"({metrics['format_correct_rate']:.0%}) | "
+        f"格式正确子集: EM={metrics['formatted_em']:.3f}  F1={metrics['formatted_f1']:.3f}"
+    )
     print(
         f"触发搜索: {metrics['search_samples']} ({metrics['search_rate']:.0%}) | "
         f"多轮搜索(≥2): {metrics['multi_turn_samples']} | "
-        f"平均轮次 {metrics['average_turns']:.2f}"
+        f"平均轮次 {metrics['average_turns']:.2f} | "
+        f"轮次分布 {metrics['turns_histogram']}"
     )
     print(f"结果 -> {args.output_path}\n指标 -> {metric_path}")
 

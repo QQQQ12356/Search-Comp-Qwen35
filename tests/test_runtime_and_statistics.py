@@ -46,6 +46,7 @@ def test_statistics_cover_quality_search_latency_and_compression():
                 "id": "1",
                 "prediction": "Paris",
                 "ground_truth": "Paris",
+                "output": "think...<answer>Paris</answer>",
                 "turns": 1,
                 "latency_seconds": 2.0,
                 "information_tokens": 64,
@@ -55,21 +56,50 @@ def test_statistics_cover_quality_search_latency_and_compression():
                 "id": "2",
                 "prediction": "[无作答]",
                 "ground_truth": "Rome",
+                "output": "think...<search>rome</search>（未闭合 answer）",
                 "turns": 2,
                 "latency_seconds": 4.0,
                 "information_tokens": 32,
                 "beacon_tokens": 2,
             },
+            {
+                "id": "3",
+                "prediction": "Big Ben",
+                "ground_truth": "Ben",
+                "output": "<answer>Big Ben</answer>",
+                "turns": 0,
+                "latency_seconds": 1.0,
+                "information_tokens": 0,
+                "beacon_tokens": 0,
+            },
         ]
     )
 
-    assert summary["em"] == 0.5
-    assert summary["search_rate"] == 1.0
+    # 总体指标：全部样本（未闭合 <answer> 的样本按 0 分计）
+    assert summary["overall_em"] == pytest.approx(1 / 3)
+    assert summary["overall_f1"] == pytest.approx((1.0 + 0.0 + 2 / 3) / 3)
+    # 兼容别名：em / f1 与总体一致
+    assert summary["em"] == summary["overall_em"]
+    assert summary["f1"] == summary["overall_f1"]
+    # 格式正确率：3 条中 2 条闭合了 <answer>...</answer>
+    assert summary["format_correct_samples"] == 2
+    assert summary["format_correct_rate"] == pytest.approx(2 / 3)
+    # 仅格式正确样本的 EM/F1
+    assert summary["formatted_em"] == pytest.approx(0.5)
+    assert summary["formatted_f1"] == pytest.approx((1.0 + 2 / 3) / 2)
+    assert summary["formatted_count"] == 2
+    # 检索轮次：均值与分布
+    assert summary["search_rate"] == pytest.approx(2 / 3)
     assert summary["multi_turn_samples"] == 1
-    assert summary["average_turns"] == 1.5
-    assert summary["latency_seconds"]["mean"] == 3.0
-    assert summary["effective_information_compression_ratio"] == 16.0
-    assert summary["answer_rate"] == 0.5
+    assert summary["average_turns"] == pytest.approx(1.0)
+    assert summary["turns_histogram"] == {"0": 1, "1": 1, "2": 1}
+    # 行为与压缩统计
+    assert summary["latency_seconds"]["mean"] == pytest.approx(7 / 3)
+    assert summary["effective_information_compression_ratio"] == pytest.approx(
+        (64 + 32) / 6
+    )
+    # answer_rate 与格式正确率同义
+    assert summary["answer_rate"] == summary["format_correct_rate"]
 
 
 def test_invalid_override_is_rejected(tmp_path):
