@@ -105,21 +105,22 @@ def test_statistics_cover_quality_search_latency_and_compression():
 def test_export_excel_writes_requested_columns(tmp_path):
     from search_comp.evaluation.export_excel import export_excel
 
-    result_path = tmp_path / "predictions.jsonl"
+    result_path = tmp_path / "metrics.json"
     result_path.write_text(
         json.dumps(
             {
-                "id": "1",
-                "prediction": "Paris",
-                "ground_truth": "Paris",
-                "output": "<answer>Paris</answer>",
-                "turns": 2,
-                "information_tokens": 64,
-                "beacon_tokens": 4,
+                "samples": 100,
+                "overall_em": 0.43,
+                "overall_f1": 0.52,
+                "format_correct_rate": 0.677,
+                "formatted_em": 0.635,
+                "formatted_f1": 0.77,
+                "average_turns": 1.43,
+                "effective_information_compression_ratio": 16.0,
+                "evaluation_config": {"model_path": "outputs/models/demo/final"},
             },
             ensure_ascii=False,
-        )
-        + "\n",
+        ),
         encoding="utf-8",
     )
     output_path = tmp_path / "summary.xlsx"
@@ -127,15 +128,17 @@ def test_export_excel_writes_requested_columns(tmp_path):
     frame = export_excel([str(result_path)], str(output_path))
 
     assert list(frame.columns) == [
-        "结果文件", "测试样本数", "总体EM", "总体F1", "格式正确率",
+        "结果文件", "模型", "测试样本数", "总体EM", "总体F1", "格式正确率",
         "格式正确EM", "格式正确F1", "平均检索轮次", "压缩比",
     ]
     row = frame.iloc[0]
-    assert row["测试样本数"] == 1
-    assert row["总体EM"] == pytest.approx(1.0)
-    assert row["格式正确率"] == pytest.approx(1.0)
-    assert row["格式正确EM"] == pytest.approx(1.0)
-    assert row["平均检索轮次"] == pytest.approx(2.0)
+    assert row["结果文件"] == str(result_path)
+    assert row["模型"] == "outputs/models/demo/final"
+    assert row["测试样本数"] == 100
+    assert row["总体EM"] == pytest.approx(0.43)
+    assert row["格式正确率"] == pytest.approx(0.677)
+    assert row["格式正确EM"] == pytest.approx(0.635)
+    assert row["平均检索轮次"] == pytest.approx(1.43)
     assert row["压缩比"] == pytest.approx(16.0)
     assert output_path.exists()
 

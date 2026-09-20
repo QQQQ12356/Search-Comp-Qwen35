@@ -35,3 +35,5 @@ venv/
 .vscode/
 *.swp
 .DS_Store
+
+tmp.json
