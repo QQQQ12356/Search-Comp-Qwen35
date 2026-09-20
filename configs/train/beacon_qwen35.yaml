@@ -26,6 +26,18 @@ use_lora: false
 lora_r: 16
 lora_alpha: 32
 lora_dropout: 0.05
+# LoRA 目标模块（可在命令行用 --set lora_target_modules=[...] 覆盖）。
+# 默认：标准注意力 + MLP 投影。
+# 如开 use_lora 只想适配窗口内 GatedDeltaNet 输入投影，改为：
+#   [in_proj_qkv, in_proj_a, in_proj_b]
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
 gradient_checkpointing: false  # 显式混合状态路径当前不做层级重计算
 beacon:
   enable_beacon: true

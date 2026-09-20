@@ -8,7 +8,7 @@
 | 想了解什么 | 看哪里 |
 |---|---|
 | 从零跑通训练 / 评测的完整流程、产物清单、排障 | [`WORKFLOW.md`](WORKFLOW.md) |
-| 每个脚本的用法、数据构建、超参含义 | [`docs/usage_qwen3.5.md`](docs/usage_qwen3.5.md) |
+| 每个脚本的用法、数据构建、超参含义 | [`docs/usage_qwen35.md`](docs/usage_qwen35.md) |
 | SearchAgent、检索信息与混合 Beacon 的逐层算法与张量流 | [`SEARCH_AGENT_BEACON_METHOD.md`](SEARCH_AGENT_BEACON_METHOD.md) |
 | 迁移结论、里程碑结果、Beacon 移植状态 | 本文件下文 |
 
@@ -25,7 +25,7 @@ bash scripts/10_test.sh
 
 # 3) 端到端冒烟：探针 -> 训练 -> 评测
 bash scripts/00_searchagent_probe.sh                       # 自动建小语料并探检索能力
-bash scripts/20_native_train.sh configs/train/native_qwen3.5.yaml
+bash scripts/20_native_train.sh configs/train/native_qwen35.yaml
 # LoRA 训练，评测前先把 adapter 合并成完整模型
 python -u -m search_comp.trainer.merge_lora \
   --base_model_path Qwen/Qwen3.5-2B \
@@ -35,15 +35,15 @@ bash scripts/21_native_eval.sh outputs/models/native_qwen3_searchr1_v1/final_mer
 ```
 
 > 默认训练数据是 Search-R1 轨迹（约 60MB，需先自行下载，见下文与
-> [`docs/usage_qwen3.5.md`](docs/usage_qwen3.5.md)）。若想跳过下载，用自建交互轨迹：
-> `DATA_MODE=interactive bash scripts/20_native_train.sh configs/train/native_qwen3.5_interactive.yaml`。
+> [`docs/usage_qwen35.md`](docs/usage_qwen35.md)）。若想跳过下载，用自建交互轨迹：
+> `DATA_MODE=interactive bash scripts/20_native_train.sh configs/train/native_qwen35_interactive.yaml`。
 
 > **仓库不含大文件。** `outputs/data/`（语料，约 70MB）、`outputs/models/`
 > （checkpoint）与 `outputs/logs/` 都不入库，分别由训练/评测脚本首次运行自动重建，
 > 或从 Hugging Face 拉取。基础模型 `Qwen/Qwen3.5-2B` 权重首次运行时会从
 > Hugging Face 下载并缓存到 `~/.cache/huggingface/hub/`。
 > Search-R1 SFT 轨迹（约 60MB）需自行下载，命令见
-> [`docs/usage_qwen3.5.md`](docs/usage_qwen3.5.md) 第 1.1 节。
+> [`docs/usage_qwen35.md`](docs/usage_qwen35.md) 第 1.1 节。
 
 > ⚠️ **重要架构事实**：`Qwen/Qwen3.5-2B` 不是 Qwen2 式纯因果 LM，而是**多模态
 > 混合架构**（`Qwen3_5ForConditionalGeneration`）——24 层中仅 6 层为标准
@@ -123,12 +123,12 @@ bash scripts/00_searchagent_probe.sh    # 构建小语料 + 生成轨迹
 ## 里程碑 3：原生搜索轨迹 SFT + 评估（完整可用）✅
 
 标准 Trainer（tqdm 进度条 + 实时 loss 可视化）在搜索轨迹上做 SFT。默认使用
-**Search-R1 官方 messages 轨迹**，与 Beacon 的 `beacon_qwen3.5_searchr1.yaml`
+**Search-R1 官方 messages 轨迹**，与 Beacon 的 `beacon_qwen35_searchr1.yaml`
 是同一份数据文件，两条线可直接对比：
 
 ```bash
 # 训练（可视化到终端）；LoRA，final/ 保存的是 adapter
-bash scripts/20_native_train.sh configs/train/native_qwen3.5.yaml
+bash scripts/20_native_train.sh configs/train/native_qwen35.yaml
 # 评测前先合并 adapter 为完整模型，再跑交互式 SearchAgent 评估 + EM/F1
 python -u -m search_comp.trainer.merge_lora \
   --base_model_path Qwen/Qwen3.5-2B \
@@ -141,7 +141,7 @@ bash scripts/21_native_eval.sh outputs/models/native_qwen3_searchr1_v1/final_mer
 
 ```bash
 DATA_MODE=interactive bash scripts/20_native_train.sh \
-  configs/train/native_qwen3.5_interactive.yaml
+  configs/train/native_qwen35_interactive.yaml
 ```
 
 - LoRA + 8-bit Adam（bitsandbytes）+ 梯度检查点，24GB 单卡可微调 1.88B。
@@ -179,7 +179,7 @@ linear attention 两类层：
 - 交互式轨迹数据（自动构建语料+轨迹）：`bash scripts/22_beacon_train.sh`
 - Search-R1 官方 SFT 轨迹（messages 格式，`data_mode: searchr1`，读
   `outputs/data/searchr1/qwen3-4b-instruct-sft.jsonl`，该文件**不在仓库内**，
-  下载方式见 [`docs/usage_qwen3.5.md`](docs/usage_qwen3.5.md) 第 1.1 节）：
+  下载方式见 [`docs/usage_qwen35.md`](docs/usage_qwen35.md) 第 1.1 节）：
   `bash scripts/24_beacon_train_searchr1.sh`
 
 > 显存注意：Beacon 前向保留跨窗口状态，不能直接对整个模型启用 Trainer 层级

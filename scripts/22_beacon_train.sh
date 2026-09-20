@@ -5,7 +5,7 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 PYTHON_BIN=$(resolve_python)
 
-CONFIG=${1:-configs/train/beacon_qwen3.5.yaml}
+CONFIG=${1:-configs/train/beacon_qwen35_searchr1.yaml}
 if [[ $# -gt 0 ]]; then shift; fi
 CORPUS=${CORPUS:-outputs/data/hotpotqa_corpus.jsonl}
 TRAIN_DATA=${TRAIN_DATA:-outputs/data/hotpotqa_train_interactive.jsonl}

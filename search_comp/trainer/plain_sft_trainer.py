@@ -19,7 +19,7 @@
 
 用法::
 
-    python -m search_comp.trainer.plain_sft_trainer --config configs/train/qwen3.5_plain_sft.yaml
+    python -m search_comp.trainer.plain_sft_trainer --config configs/train/qwen35_plain_sft.yaml
 """
 
 from __future__ import annotations
@@ -90,6 +90,15 @@ def collate_sft_batch(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.T
     }
 
 
+# LoRA 默认目标模块：标准 Qwen/Llama 式注意力 + MLP 投影。
+# 可在 config 里用 ``lora_target_modules`` 覆盖，例如仅适配 GatedDeltaNet
+# 窗口内输入投影（in_proj_qkv / in_proj_a / in_proj_b）。
+DEFAULT_LORA_TARGET_MODULES = [
+    "q_proj", "k_proj", "v_proj", "o_proj",
+    "gate_proj", "up_proj", "down_proj",
+]
+
+
 def apply_lora(model, cfg: Dict[str, Any]):
     """挂上 LoRA adapter，冻结基础权重只训练低秩分支。"""
     from peft import LoraConfig, get_peft_model
@@ -98,10 +107,7 @@ def apply_lora(model, cfg: Dict[str, Any]):
         r=cfg.get("lora_r", 16),
         lora_alpha=cfg.get("lora_alpha", 32),
         lora_dropout=cfg.get("lora_dropout", 0.05),
-        target_modules=[
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-        ],
+        target_modules=cfg.get("lora_target_modules", DEFAULT_LORA_TARGET_MODULES),
         bias="none",
     )
     peft_model = get_peft_model(model, lora_cfg)

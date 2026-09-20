@@ -1,8 +1,8 @@
 # Qwen3.5 原生搜索轨迹 SFT（无 Beacon，标准 Trainer）
-# 数据：Search-R1 官方 messages 轨迹，与 configs/train/beacon_qwen3.5_searchr1.yaml
+# 数据：Search-R1 官方 messages 轨迹，与 configs/train/beacon_qwen35_searchr1.yaml
 #       使用**同一份文件**，原生 / Beacon 两条线可直接对比。
 # 注意：Search-R1 轨迹保留完整路径、不截断，max_length 仅对 data_mode=interactive 生效。
-# 交互式轨迹的版本见 configs/train/native_qwen3.5_interactive.yaml。
+# 交互式轨迹的版本见 configs/train/native_qwen35_interactive.yaml。
 # 命令行可用 --set key=value 覆盖任意参数，不需要修改本文件。
 model_name_or_path: "Qwen/Qwen3.5-2B"
 data_mode: "searchr1"
@@ -14,7 +14,7 @@ grad_accum_steps: 4
 learning_rate: 5.0e-5
 weight_decay: 0.01
 optim: "adamw_bnb_8bit"        # LoRA + 8bit Adam，24GB 单卡可跑
-lr_scheduler_type: "constant"  # 与 beacon_qwen3.5_searchr1.yaml 对齐
+lr_scheduler_type: "constant"  # 与 beacon_qwen35_searchr1.yaml 对齐
 warmup_ratio: 0.0
 max_grad_norm: 1.0
 num_epochs: 1

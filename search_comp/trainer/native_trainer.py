@@ -6,7 +6,7 @@
 支持两种训练数据（``data_mode``）：
 
 - ``searchr1``（默认）：Search-R1 官方 ``messages`` 格式的 SFT 轨迹，
-  与 Beacon 的 ``beacon_qwen3.5_searchr1.yaml`` **使用同一份数据文件**，
+  与 Beacon 的 ``beacon_qwen35_searchr1.yaml`` **使用同一份数据文件**，
   因此两者可直接对比。复用 :class:`search_comp.data.searchr1_dataset.SearchR1SFTDataset`，
   不截断轨迹。
 - ``interactive``：本项目用 HotpotQA 规则构造的交互轨迹，与 Beacon 的
@@ -21,7 +21,7 @@
 
 用法::
 
-    python -m search_comp.trainer.native_trainer --config configs/train/native_qwen3.5.yaml
+    python -m search_comp.trainer.native_trainer --config configs/train/native_qwen35.yaml
 """
 
 from __future__ import annotations

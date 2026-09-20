@@ -13,7 +13,7 @@
 
 用法::
 
-    python -m search_comp.trainer.beacon_trainer --config configs/train/beacon_qwen3.5_searchr1.yaml
+    python -m search_comp.trainer.beacon_trainer --config configs/train/beacon_qwen35_searchr1.yaml
 """
 
 from __future__ import annotations
@@ -170,10 +170,16 @@ def main_train(
             r=cfg.get("lora_r", 16),
             lora_alpha=cfg.get("lora_alpha", 32),
             lora_dropout=cfg.get("lora_dropout", 0.05),
-            target_modules=[
-                "q_proj", "k_proj", "v_proj", "o_proj",
-                "gate_proj", "up_proj", "down_proj",
-            ],
+            # 目标模块从 config 读取（lora_target_modules），默认标准注意力+MLP 投影；
+            # 如需仅适配窗口内 GatedDeltaNet 输入投影，可设为
+            #   [in_proj_qkv, in_proj_a, in_proj_b]
+            target_modules=cfg.get(
+                "lora_target_modules",
+                [
+                    "q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj",
+                ],
+            ),
             bias="none",
         )
         model = get_peft_model(model, lora_cfg)

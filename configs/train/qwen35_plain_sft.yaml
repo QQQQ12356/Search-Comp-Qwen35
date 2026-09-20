@@ -1,7 +1,7 @@
 # Qwen3.5 纯文本 SFT 训练配置（无 Beacon、不压缩）
 # 数据：Search-R1 官方 messages 轨迹，loss 只对 assistant 输出计算。
 # 模型：Qwen3_5ForCausalLM 纯文本因果 LM（复用 plain_qwen3 装载）。
-# 与 Beacon 训练（configs/train/beacon_qwen3.5_searchr1.yaml）使用**同一份数据文件**，
+# 与 Beacon 训练（configs/train/beacon_qwen35_searchr1.yaml）使用**同一份数据文件**，
 # 但本路径不挂任何压缩参数，可直接对比「压缩 vs 不压缩」。
 # 命令行可用 --set key=value 覆盖任意参数，不需要修改本文件。
 # 入口：scripts/20_native_train.sh   |  训练器：search_comp.trainer.plain_sft_trainer
@@ -40,6 +40,18 @@ use_lora: true
 lora_r: 16
 lora_alpha: 32
 lora_dropout: 0.05
+# LoRA 目标模块（可在命令行用 --set lora_target_modules=[...] 覆盖）。
+# 默认：标准注意力 + MLP 投影。
+# 如需仅适配 GatedDeltaNet 窗口内输入投影，改为：
+#   [in_proj_qkv, in_proj_a, in_proj_b]
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
 
 exp_name: "qwen35_plain_sft_v1"
 output_dir: "outputs"

@@ -22,7 +22,7 @@ if [[ -n ${SHADOWED_LD_PATHS:-} && -n ${LD_LIBRARY_PATH:-} ]]; then
   export LD_LIBRARY_PATH
 fi
 PYTHON_BIN=$(resolve_python)
-CONFIG=${1:-configs/train/beacon_qwen3.5_searchr1.yaml}
+CONFIG=${1:-configs/train/beacon_qwen35_searchr1.yaml}
 if [[ $# -gt 0 ]]; then shift; fi
 mkdir -p outputs/models
 echo "[beacon-searchr1] 训练数据: Search-R1 messages 轨迹（默认 outputs/data/searchr1/qwen3-4b-instruct-sft.jsonl）"

@@ -22,7 +22,7 @@ tests/                     # 不下载大模型的单元与小模型回归测试
 无 Beacon 的「纯文本 SFT」线各有一套最小实现，互不影响 Beacon 文件：
 
 - 建模：`search_comp/models/plain_qwen3.py`
-- 训练：`search_comp/trainer/plain_sft_trainer.py` + `configs/train/qwen3.5_plain_sft.yaml`
+- 训练：`search_comp/trainer/plain_sft_trainer.py` + `configs/train/qwen35_plain_sft.yaml`
 - 评测：`search_comp/evaluation/plain_interactive_eval.py`
 
 核心数据协议为：模型生成 `<search>query</search>`，检索器返回
@@ -87,19 +87,19 @@ FULL_MODEL_TEST=1 CUDA_VISIBLE_DEVICES=0 bash scripts/10_test.sh
 Beacon 各为一套建模 / 训练 / 评测文件，但做了最小化脱钩，互不影响 Beacon 文件。
 训练数据是 Search-R1 官方 `messages` 轨迹
 `outputs/data/searchr1/qwen3-4b-instruct-sft.jsonl`（需先按 §2.1 准备），与 Beacon
-训练（`beacon_qwen3.5_searchr1.yaml`）使用**同一份文件**，可直接对比「压缩 vs 不压缩」。
+训练（`beacon_qwen35_searchr1.yaml`）使用**同一份文件**，可直接对比「压缩 vs 不压缩」。
 
 直接调用标准 Trainer：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/20_native_train.sh \
-  configs/train/qwen3.5_plain_sft.yaml
+  configs/train/qwen35_plain_sft.yaml
 ```
 
 无需编辑 YAML 即可覆盖参数：
 
 ```bash
-bash scripts/20_native_train.sh configs/train/qwen3.5_plain_sft.yaml \
+bash scripts/20_native_train.sh configs/train/qwen35_plain_sft.yaml \
   --set learning_rate=1e-5 \
   --set max_train_steps=100 \
   --set exp_name=plain_smoke
@@ -123,7 +123,7 @@ Search-R1 轨迹**不截断**，collator 固定 `batch_size=1`，靠 `grad_accum
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -u -m search_comp.trainer.plain_sft_trainer \
-  --config configs/train/qwen3.5_plain_sft.yaml \
+  --config configs/train/qwen35_plain_sft.yaml \
   --resume_from_checkpoint outputs/models/qwen35_plain_sft_v1/checkpoint-1000
 ```
 
@@ -148,21 +148,21 @@ python -u -m search_comp.trainer.merge_lora \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/22_beacon_train.sh \
-  configs/train/beacon_qwen3.5.yaml
+  configs/train/beacon_qwen35.yaml
 ```
 
 使用已有 Search-R1 messages 轨迹（输入文件需先按 §2.1 准备）：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/24_beacon_train_searchr1.sh \
-  configs/train/beacon_qwen3.5_searchr1.yaml
+  configs/train/beacon_qwen35_searchr1.yaml
 ```
 
 常用覆盖示例：
 
 ```bash
 bash scripts/24_beacon_train_searchr1.sh \
-  configs/train/beacon_qwen3.5_searchr1.yaml \
+  configs/train/beacon_qwen35_searchr1.yaml \
   --set max_train_steps=200 \
   --set beacon.beacon_ratio=32 \
   --set beacon.beacon_linear_writer_rank=64 \

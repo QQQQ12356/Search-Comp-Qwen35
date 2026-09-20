@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Qwen3.5 纯文本 SFT 训练（标准 Trainer + tqdm 可视化，无 Beacon、不压缩）。
-# 数据：Search-R1 官方 messages 轨迹（与 beacon_qwen3.5_searchr1.yaml 使用
+# 数据：Search-R1 官方 messages 轨迹（与 beacon_qwen35_searchr1.yaml 使用
 # 同一份文件，但这里不挂任何压缩参数，可直接对比压缩 vs 不压缩）。
 # 训练器：search_comp.trainer.plain_sft_trainer
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 PYTHON_BIN=$(resolve_python)
 
-CONFIG=${1:-configs/train/qwen3.5_plain_sft.yaml}
+CONFIG=${1:-configs/train/qwen35_plain_sft.yaml}
 if [[ $# -gt 0 ]]; then shift; fi
 SEARCHR1_DATA=${SEARCHR1_DATA:-outputs/data/searchr1/qwen3-4b-instruct-sft.jsonl}
 

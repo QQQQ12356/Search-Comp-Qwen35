@@ -53,7 +53,7 @@ SEARCH_R1_DATA_HINT = (
     "  huggingface-cli download --repo-type dataset PeterJinGo/nq_hotpotqa_train \\\n"
     "      --include '*instruct-sft.jsonl' --local-dir outputs/data/searchr1\n"
     "或把配置里的 train_data_path 指向已有文件的绝对路径：\n"
-    "  bash scripts/24_beacon_train_searchr1.sh configs/train/beacon_qwen3.5_searchr1.yaml \\\n"
+    "  bash scripts/24_beacon_train_searchr1.sh configs/train/beacon_qwen35_searchr1.yaml \\\n"
     "      --set train_data_path=/path/to/qwen3-4b-instruct-sft.jsonl"
 )
 

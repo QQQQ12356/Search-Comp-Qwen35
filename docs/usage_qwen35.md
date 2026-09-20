@@ -38,7 +38,7 @@
 
 ```bash
 bash scripts/24_beacon_train_searchr1.sh [config]
-# 默认 config = configs/train/beacon_qwen3.5_searchr1.yaml
+# 默认 config = configs/train/beacon_qwen35_searchr1.yaml
 ```
 
 - 训练数据：`outputs/data/searchr1/qwen3-4b-instruct-sft.jsonl`
@@ -56,7 +56,7 @@ bash scripts/24_beacon_train_searchr1.sh [config]
   ```bash
   ln -s /path/to/qwen3-4b-instruct-sft.jsonl outputs/data/searchr1/qwen3-4b-instruct-sft.jsonl
   # 或
-  bash scripts/24_beacon_train_searchr1.sh configs/train/beacon_qwen3.5_searchr1.yaml \
+  bash scripts/24_beacon_train_searchr1.sh configs/train/beacon_qwen35_searchr1.yaml \
       --set train_data_path=/path/to/qwen3-4b-instruct-sft.jsonl
   ```
 - 数据格式：`{messages: [{role: system}, {role: user, ...Question}, {role: assistant, <think>...<search>...}, {role: user, <information>...}, {role: assistant, <think>...<answer>...}]}`。
@@ -69,7 +69,7 @@ bash scripts/24_beacon_train_searchr1.sh [config]
 
 ```bash
 bash scripts/22_beacon_train.sh [config]
-# 默认 config = configs/train/beacon_qwen3.5.yaml
+# 默认 config = configs/train/beacon_qwen35.yaml
 ```
 
 自动执行：① 构建语料（`build_corpus`，train/val 各 5000 样本）→ ② 构建交互式
@@ -79,7 +79,7 @@ bash scripts/22_beacon_train.sh [config]
 
 ```bash
 bash scripts/20_native_train.sh [config]
-# 默认 config = configs/train/native_qwen3.5.yaml
+# 默认 config = configs/train/native_qwen35.yaml
 ```
 
 用标准 `transformers.Trainer`（tqdm 进度条 + 实时 loss）做原生搜索轨迹 SFT，
@@ -158,7 +158,7 @@ bash scripts/verify_beacon.sh
 |------|------|------|
 | `model_name_or_path` | `Qwen/Qwen3.5-2B` | 基础模型（本地已缓存） |
 | `train_data_path` | 见各 config | 训练数据 JSONL 路径 |
-| `data_mode` | 见各 config | 数据模式：`searchr1`（Search-R1 messages）/ `interactive`（交互式轨迹）。native 配置默认 `searchr1`，`beacon_qwen3.5.yaml` 为 `interactive` |
+| `data_mode` | 见各 config | 数据模式：`searchr1`（Search-R1 messages）/ `interactive`（交互式轨迹）。native 配置默认 `searchr1`，`beacon_qwen35.yaml` 为 `interactive` |
 | `max_length` | 8192 | 最大 token 数（超出的压缩区/损失区被丢弃）；`searchr1` 轨迹不截断，此参数只对 `interactive` 生效 |
 | `learning_rate` | `5.0e-5` | AdamW 学习率 |
 | `weight_decay` | `0.01` | 权重衰减 |
