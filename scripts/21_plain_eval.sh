@@ -5,14 +5,14 @@
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 PYTHON_BIN=$(resolve_python)
-
-MODEL_PATH=${1:-outputs/models/qwen35_plain_sft_v1/final_merged}
-RESULT_PATH=${2:-outputs/results/qwen35_plain_sft_v1/predictions.jsonl}
+MAX_QUESTIONS=${MAX_QUESTIONS:-1000}
+MODEL_PATH=${1:-outputs/models/qwen35-4B_plain_sft_v1/final_merged}
+RESULT_PATH=${2:-outputs/results/qwen35-4B_plain_sft_v1/${MAX_QUESTIONS}qa_predictions.jsonl}
 shift $(( $# >= 2 ? 2 : $# ))
-DATASET_NAME=${DATASET_NAME:-hotpot_qa}
+DATASET_NAME=${DATASET_NAME:-hotpotqa/hotpot_qa}
 DATASET_CONFIG=${DATASET_CONFIG:-distractor}
 CORPUS=${CORPUS:-outputs/data/hotpotqa_corpus.jsonl}
-CORPUS_PER_SPLIT=${CORPUS_PER_SPLIT:-5000}
+CORPUS_PER_SPLIT=${CORPUS_PER_SPLIT:-7405}
 MAX_QUESTIONS=${MAX_QUESTIONS:-200}
 MAX_TURNS=${MAX_TURNS:-3}
 TOP_K=${TOP_K:-3}
@@ -25,7 +25,7 @@ mkdir -p outputs/data outputs/results
 if [ ! -f "$CORPUS" ]; then
   echo "[plain-eval] 语料库（不存在则构建）: $CORPUS"
   "$PYTHON_BIN" -u -m search_comp.data.build_corpus \
-      --output_path "$CORPUS" --splits train,validation --max_per_split "$CORPUS_PER_SPLIT"
+      --output_path "$CORPUS" --splits validation --max_per_split "$CORPUS_PER_SPLIT"
 fi
 
 SAMPLE_ARGS=()
@@ -34,7 +34,7 @@ if [ "$DO_SAMPLE" = "1" ]; then SAMPLE_ARGS=(--do_sample --temperature 0.8); fi
 EXTRA_ARGS=("$@")
 if [[ ${RESUME:-0} == 1 ]]; then EXTRA_ARGS+=(--resume); fi
 LOG_PATH=${LOG_PATH:-$(new_log_path plain_eval)}
-run_logged "$LOG_PATH" env CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
+run_logged "$LOG_PATH" env CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1} \
     "$PYTHON_BIN" -u -m search_comp.evaluation.plain_interactive_eval \
     --model_path "$MODEL_PATH" \
     --corpus_path "$CORPUS" \

@@ -6,13 +6,14 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 PYTHON_BIN=$(resolve_python)
 
-MODEL_PATH=${1:-Qwen/Qwen3.5-2B}
-RESULT_PATH=${2:-outputs/results/untrained_direct/predictions.jsonl}
+MODEL_PATH=${1:-Qwen/Qwen3.5-4B}
+MAX_QUESTIONS=${MAX_QUESTIONS:-10}
+RESULT_PATH=${2:-outputs/results/untrained_direct/${MAX_QUESTIONS}qa_predictions.jsonl}
 shift $(( $# >= 2 ? 2 : $# ))
-DATASET_NAME=${DATASET_NAME:-hotpot_qa}
+DATASET_NAME=${DATASET_NAME:-hotpotqa/hotpot_qa}
 DATASET_CONFIG=${DATASET_CONFIG:-distractor}
-MAX_QUESTIONS=${MAX_QUESTIONS:-200}
-MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-256}
+
+MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-10}
 DO_SAMPLE=${DO_SAMPLE:-0}
 
 mkdir -p outputs/results

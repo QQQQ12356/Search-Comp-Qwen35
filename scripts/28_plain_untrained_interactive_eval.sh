@@ -7,14 +7,15 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 PYTHON_BIN=$(resolve_python)
 
-MODEL_PATH=${1:-Qwen/Qwen3.5-2B}
-RESULT_PATH=${2:-outputs/results/untrained_plain/predictions.jsonl}
+MODEL_PATH=${1:-Qwen/Qwen3.5-4B}
+MAX_QUESTIONS=${MAX_QUESTIONS:-10}
+RESULT_PATH=${2:-outputs/results/untrained_plain/${MAX_QUESTIONS}qa_predictions.jsonl}
 shift $(( $# >= 2 ? 2 : $# ))
-DATASET_NAME=${DATASET_NAME:-hotpot_qa}
+DATASET_NAME=${DATASET_NAME:-hotpotqa/hotpot_qa}
 DATASET_CONFIG=${DATASET_CONFIG:-distractor}
 CORPUS=${CORPUS:-outputs/data/hotpotqa_corpus.jsonl}
-CORPUS_PER_SPLIT=${CORPUS_PER_SPLIT:-5000}
-MAX_QUESTIONS=${MAX_QUESTIONS:-200}
+CORPUS_PER_SPLIT=${CORPUS_PER_SPLIT:-7405}
+
 MAX_TURNS=${MAX_TURNS:-3}
 TOP_K=${TOP_K:-3}
 MAX_DOCS_TOKENS=${MAX_DOCS_TOKENS:-1024}
@@ -26,7 +27,7 @@ mkdir -p outputs/data outputs/results
 if [ ! -f "$CORPUS" ]; then
   echo "[plain-eval] 语料库（不存在则构建）: $CORPUS"
   "$PYTHON_BIN" -u -m search_comp.data.build_corpus \
-      --output_path "$CORPUS" --splits train,validation --max_per_split "$CORPUS_PER_SPLIT"
+      --output_path "$CORPUS" --splits validation --max_per_split "$CORPUS_PER_SPLIT"
 fi
 
 SAMPLE_ARGS=()
