@@ -102,6 +102,44 @@ def test_statistics_cover_quality_search_latency_and_compression():
     assert summary["answer_rate"] == summary["format_correct_rate"]
 
 
+def test_export_excel_writes_requested_columns(tmp_path):
+    from search_comp.evaluation.export_excel import export_excel
+
+    result_path = tmp_path / "predictions.jsonl"
+    result_path.write_text(
+        json.dumps(
+            {
+                "id": "1",
+                "prediction": "Paris",
+                "ground_truth": "Paris",
+                "output": "<answer>Paris</answer>",
+                "turns": 2,
+                "information_tokens": 64,
+                "beacon_tokens": 4,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "summary.xlsx"
+
+    frame = export_excel([str(result_path)], str(output_path))
+
+    assert list(frame.columns) == [
+        "结果文件", "测试样本数", "总体EM", "总体F1", "格式正确率",
+        "格式正确EM", "格式正确F1", "平均检索轮次", "压缩比",
+    ]
+    row = frame.iloc[0]
+    assert row["测试样本数"] == 1
+    assert row["总体EM"] == pytest.approx(1.0)
+    assert row["格式正确率"] == pytest.approx(1.0)
+    assert row["格式正确EM"] == pytest.approx(1.0)
+    assert row["平均检索轮次"] == pytest.approx(2.0)
+    assert row["压缩比"] == pytest.approx(16.0)
+    assert output_path.exists()
+
+
 def test_invalid_override_is_rejected(tmp_path):
     config_path = tmp_path / "train.yaml"
     config_path.write_text("seed: 42\n", encoding="utf-8")
