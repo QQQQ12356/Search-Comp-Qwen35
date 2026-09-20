@@ -9,6 +9,8 @@ PYTHON_BIN=$(resolve_python)
 MODEL_PATH=${1:-outputs/models/qwen35_plain_sft_v1/final_merged}
 RESULT_PATH=${2:-outputs/results/qwen35_plain_sft_v1/predictions.jsonl}
 shift $(( $# >= 2 ? 2 : $# ))
+DATASET_NAME=${DATASET_NAME:-hotpot_qa}
+DATASET_CONFIG=${DATASET_CONFIG:-distractor}
 CORPUS=${CORPUS:-outputs/data/hotpotqa_corpus.jsonl}
 CORPUS_PER_SPLIT=${CORPUS_PER_SPLIT:-5000}
 MAX_QUESTIONS=${MAX_QUESTIONS:-200}
@@ -38,6 +40,7 @@ run_logged "$LOG_PATH" env CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
     --corpus_path "$CORPUS" \
     --output_path "$RESULT_PATH" \
     --split validation \
+    --dataset_name "$DATASET_NAME" --dataset_config "$DATASET_CONFIG" \
     --max_questions "$MAX_QUESTIONS" \
     --max_turns "$MAX_TURNS" --topk "$TOP_K" \
     --max_docs_tokens "$MAX_DOCS_TOKENS" \

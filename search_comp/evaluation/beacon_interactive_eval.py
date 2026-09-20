@@ -118,6 +118,8 @@ def main() -> None:
     parser.add_argument("--corpus_path", type=str, required=True)
     parser.add_argument("--output_path", type=str, required=True)
     parser.add_argument("--split", type=str, default="validation")
+    parser.add_argument("--dataset_name", type=str, default="hotpot_qa")
+    parser.add_argument("--dataset_config", type=str, default="distractor")
     parser.add_argument("--max_questions", type=int, default=100)
     parser.add_argument("--max_turns", type=int, default=3)
     parser.add_argument("--topk", type=int, default=3)
@@ -142,7 +144,7 @@ def main() -> None:
     retriever = BM25Retriever(args.corpus_path)
     from datasets import load_dataset
 
-    hp = load_dataset("hotpot_qa", "distractor", split=args.split)
+    hp = load_dataset(args.dataset_name, args.dataset_config, split=args.split)
     if args.max_questions:
         hp = hp.select(range(args.max_questions))
 

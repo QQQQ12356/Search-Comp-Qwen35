@@ -9,6 +9,8 @@ PYTHON_BIN=$(resolve_python)
 MODEL_PATH=${1:-Qwen/Qwen3.5-2B}
 RESULT_PATH=${2:-outputs/results/untrained_direct/predictions.jsonl}
 shift $(( $# >= 2 ? 2 : $# ))
+DATASET_NAME=${DATASET_NAME:-hotpot_qa}
+DATASET_CONFIG=${DATASET_CONFIG:-distractor}
 MAX_QUESTIONS=${MAX_QUESTIONS:-200}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-256}
 DO_SAMPLE=${DO_SAMPLE:-0}
@@ -26,6 +28,7 @@ run_logged "$LOG_PATH" env CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
     --model_path "$MODEL_PATH" \
     --output_path "$RESULT_PATH" \
     --split validation \
+    --dataset_name "$DATASET_NAME" --dataset_config "$DATASET_CONFIG" \
     --max_questions "$MAX_QUESTIONS" \
     --max_new_tokens "$MAX_NEW_TOKENS" \
     "${SAMPLE_ARGS[@]}" "${EXTRA_ARGS[@]}"
