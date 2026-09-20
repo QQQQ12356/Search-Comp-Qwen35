@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 from statistics import mean, median
 from collections import Counter
@@ -123,6 +124,117 @@ def summarize_file(path: str | Path) -> dict[str, Any]:
     summary = summarize_results(load_jsonl(path))
     summary["result_path"] = str(path)
     return summary
+
+
+class ProgressCheckpointer:
+    """评测进度检查点：每跨过一个进度阈值计算一次当前指标并落盘/打印。
+
+    以「已完成样本数 / 总题数」作为进度变量。每处理到 ``interval``（默认 20%）
+    的整数倍，就用当前已收集的结果运行 ``summarize_results``，把检查点追加进
+    ``progress_metrics`` 列表写入指标文件（额外字段），并把一行摘要打印到
+    stdout —— 被 shell 的 ``run_logged``（tee）同时写入日志文件与终端。
+
+    Args:
+        total: 总题数，用于计算进度。
+        metric_path: 指标 JSON 路径（通常是 ``<output>_metrics.json``）。
+        interval: 进度阈值间隔，须在 ``(0, 1)``。默认取环境变量
+            ``EVAL_PROGRESS_INTERVAL``（例如 ``0.25``），否则 0.2。
+        config: 评测配置（可选），写入指标文件的 ``evaluation_config`` 字段。
+
+    Usage::
+
+        cp = ProgressCheckpointer(total=len(hp), metric_path=metric_path,
+                                  config=vars(args))
+        for ex in hp:
+            ...
+            results.append(r)
+            cp.update(results)
+        cp.finalize(summarize_results(results))
+    """
+
+    def __init__(
+        self,
+        total: int,
+        metric_path: str | Path,
+        interval: float | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> None:
+        if interval is None:
+            interval = float(os.environ.get("EVAL_PROGRESS_INTERVAL", "0.2"))
+        if not 0.0 < float(interval) < 1.0:
+            raise ValueError(f"进度阈值 interval 需在 (0,1) 之间，实际为 {interval}")
+        self.total = int(total)
+        self.metric_path = str(metric_path)
+        self.interval = float(interval)
+        self.config = config or {}
+        # 第一个阈值以「处理数」对齐到 interval 的最小整数。
+        self._next_at = max(1, math.ceil(self.total * self.interval))
+        self.records: list[dict[str, Any]] = []
+
+    def update(self, results: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """用当前已处理结果尝试推进检查点；跨过阈值时计算、落盘并打印。
+
+        Args:
+            results: 当前已处理（含 resume 的已完成）样本列表。
+
+        Returns:
+            生成的检查点记录；未跨过阈值时返回 None。
+        """
+        processed = len(results)
+        if self.total == 0 or processed < self._next_at:
+            return None
+        record = self._build_record(results)
+        self.records.append(record)
+        self._write()
+        self._print(record)
+        # 已到末尾则推进到永不触发；否则推进一个 interval。
+        if processed >= self.total:
+            self._next_at = self.total + 1
+        else:
+            self._next_at = processed + max(1, math.ceil(self.total * self.interval))
+        return record
+
+    def finalize(self, final_metrics: dict[str, Any]) -> None:
+        """写入最终指标文件：完整指标 + 全部进度检查点 + 配置。"""
+        payload = {
+            **final_metrics,
+            "progress_metrics": self.records,
+            "evaluation_config": self.config,
+        }
+        write_json(self.metric_path, payload)
+
+    def _build_record(self, results: list[dict[str, Any]]) -> dict[str, Any]:
+        metrics = summarize_results(results)
+        processed = len(results)
+        return {
+            "progress": len(results) / self.total if self.total else 0.0,
+            "processed": processed,
+            "total": self.total,
+            "em": metrics["overall_em"],
+            "f1": metrics["overall_f1"],
+            "format_correct_rate": metrics["format_correct_rate"],
+            "formatted_em": metrics["formatted_em"],
+            "formatted_f1": metrics["formatted_f1"],
+            "search_rate": metrics["search_rate"],
+            "average_turns": metrics["average_turns"],
+            "samples": metrics["samples"],
+        }
+
+    def _write(self) -> None:
+        payload = {"progress_metrics": self.records, "evaluation_config": self.config}
+        write_json(self.metric_path, payload)
+
+    @staticmethod
+    def _print(record: dict[str, Any]) -> None:
+        print(
+            f"[progress] 进度 {record['progress']:.0%} "
+            f"({record['processed']}/{record['total']}) | "
+            f"EM={record['em']:.3f} F1={record['f1']:.3f} | "
+            f"格式正确率={record['format_correct_rate']:.0%} "
+            f"(子集 EM={record['formatted_em']:.3f} F1={record['formatted_f1']:.3f}) | "
+            f"搜索率={record['search_rate']:.0%} 平均轮次={record['average_turns']:.2f}",
+            flush=True,
+        )
 
 
 def main() -> None:

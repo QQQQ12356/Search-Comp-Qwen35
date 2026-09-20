@@ -28,6 +28,7 @@ import torch
 from ..data.retrieval import BM25Retriever
 from ..milestones.searchagent_sysprompt_probe import run_sysprompt_probe
 from .em_f1 import compute_metrics
+from .statistics import ProgressCheckpointer, summarize_results
 
 
 def load_for_eval(model_path: str):
@@ -76,6 +77,8 @@ def main() -> None:
 
     print(f"=== SFT 复测 style={args.style} model={args.model_path} n={len(hp)} ===")
     results = []
+    metric_path = os.path.splitext(args.output_path)[0] + "_metrics.json"
+    checkpointer = ProgressCheckpointer(len(hp), metric_path, config=vars(args))
     for i, ex in enumerate(hp):
         r = run_sysprompt_probe(
             model, tokenizer, retriever, str(ex["question"]),
@@ -87,6 +90,7 @@ def main() -> None:
         r["id"] = str(ex["id"])
         r["ground_truth"] = str(ex["answer"]).strip()
         results.append(r)
+        checkpointer.update(results)
 
     with open(args.output_path, "w", encoding="utf-8") as f:
         for r in results:
@@ -99,7 +103,9 @@ def main() -> None:
     nempty = sum(1 for q in (q for r in results for q in r["queries"]) if not q.strip())
     print(f"EM={metrics['em']:.3f} F1={metrics['f1']:.3f} 搜索={ns}({ns/len(results):.0%}) "
           f"<answer>={na} 总query={nq} 空query={nempty} avgTurns={sum(r['turns'] for r in results)/len(results):.2f}")
+    checkpointer.finalize(summarize_results(results))
     print(f"-> {args.output_path}")
+    print(f"[sft-reeval] 指标 -> {metric_path}")
 
 
 if __name__ == "__main__":

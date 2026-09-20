@@ -26,8 +26,8 @@ import torch
 from tqdm import tqdm
 
 from ..milestones.qwen35_text import load_text_causal_model, load_text_tokenizer
-from ..evaluation.statistics import summarize_results
-from ..utils.runtime import append_jsonl, write_json
+from ..evaluation.statistics import ProgressCheckpointer, summarize_results
+from ..utils.runtime import append_jsonl
 
 #: 空白角色 system + 最简洁直接作答的用户指令（不引入 think、不要求 <answer> 标签）。
 PROMPT_TEMPLATE = (
@@ -83,6 +83,8 @@ def main() -> None:
 
     print(f"\n[direct-eval] 模型={args.model_path} 题数={len(hp)} 已完成={len(completed)}", flush=True)
     results = list(completed.values())
+    metric_path = os.path.splitext(args.output_path)[0] + "_metrics.json"
+    checkpointer = ProgressCheckpointer(len(hp), metric_path, config=vars(args))
     progress = tqdm(hp, desc="direct-eval", ncols=100)
     for ex in progress:
         example_id = str(ex["id"])
@@ -122,11 +124,11 @@ def main() -> None:
         }
         results.append(r)
         append_jsonl(args.output_path, r)
+        checkpointer.update(results)
         progress.set_postfix(pred=str(r["prediction"])[:24])
 
     metrics = summarize_results(results)
-    metric_path = os.path.splitext(args.output_path)[0] + "_metrics.json"
-    write_json(metric_path, {**metrics, "evaluation_config": vars(args)})
+    checkpointer.finalize(metrics)
 
     print(f"\n=== 结果 ===")
     print(f"EM={metrics['em']:.3f}  F1={metrics['f1']:.3f}  (samples={metrics['samples']})")

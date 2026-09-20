@@ -26,8 +26,8 @@ from tqdm import tqdm
 from ..data.retrieval import BM25Retriever
 from ..milestones.searchagent_probe import run_searchagent_probe
 from ..models.plain_qwen3 import load_sft_model, load_sft_tokenizer
-from .statistics import summarize_results
-from ..utils.runtime import append_jsonl, write_json
+from .statistics import ProgressCheckpointer, summarize_results
+from ..utils.runtime import append_jsonl
 
 
 def main() -> None:
@@ -79,6 +79,8 @@ def main() -> None:
 
     print(f"\n[plain-eval] 总题数={len(hp)} 已完成={len(completed)}", flush=True)
     results = list(completed.values())
+    metric_path = os.path.splitext(args.output_path)[0] + "_metrics.json"
+    checkpointer = ProgressCheckpointer(len(hp), metric_path, config=vars(args))
     progress = tqdm(hp, desc="plain-eval", ncols=100)
     for ex in progress:
         example_id = str(ex["id"])
@@ -103,11 +105,11 @@ def main() -> None:
         )
         results.append(r)
         append_jsonl(args.output_path, r)
+        checkpointer.update(results)
         progress.set_postfix(turns=r.get("turns", 0), pred=str(r.get("prediction", ""))[:24])
 
     metrics = summarize_results(results)
-    metric_path = os.path.splitext(args.output_path)[0] + "_metrics.json"
-    write_json(metric_path, {**metrics, "evaluation_config": vars(args)})
+    checkpointer.finalize(metrics)
 
     print(f"\n=== 结果 ===")
     print(

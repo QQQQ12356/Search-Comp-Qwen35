@@ -33,8 +33,8 @@ from ..data.trajectory import (
 )
 from ..models.beacon_config import BeaconConfig
 from .em_f1 import extract_answer
-from .statistics import summarize_results
-from ..utils.runtime import append_jsonl, write_json
+from .statistics import ProgressCheckpointer, summarize_results
+from ..utils.runtime import append_jsonl
 
 # 模型未闭合 <answer>...</answer> 时的占位答案（按协议视为未作答，而非整段轨迹兜底）
 NO_ANSWER = "[无作答]"
@@ -159,6 +159,8 @@ def main() -> None:
         os.remove(args.output_path)
     print(f"[beacon-eval] 总题数={len(hp)} 已完成={len(completed)}", flush=True)
     results = list(completed.values())
+    mp = os.path.splitext(args.output_path)[0] + "_metrics.json"
+    checkpointer = ProgressCheckpointer(len(hp), mp, config=vars(args))
     pbar = tqdm(hp, desc="eval", ncols=100)
     for ex in pbar:
         example_id = str(ex["id"])
@@ -175,11 +177,11 @@ def main() -> None:
         r["latency_seconds"] = round(time.time() - started_at, 4)
         results.append(r)
         append_jsonl(args.output_path, r)
+        checkpointer.update(results)
         pbar.set_postfix(turns=r["turns"], pred=r["prediction"][:30])
 
     m = summarize_results(results)
-    mp = os.path.splitext(args.output_path)[0] + "_metrics.json"
-    write_json(mp, {**m, "evaluation_config": vars(args)})
+    checkpointer.finalize(m)
     print(
         f"[beacon-eval] 总体 EM={m['overall_em']:.3f} F1={m['overall_f1']:.3f} | "
         f"格式正确率 {m['format_correct_rate']:.0%} "
