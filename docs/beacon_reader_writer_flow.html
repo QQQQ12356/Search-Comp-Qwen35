@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Beacon Reader / Writer 架构流程</title>
+<style>
+  :root {
+    --bg: #0f1720;
+    --bg2: #16202c;
+    --panel: #1c2836;
+    --border: #2c3a4d;
+    --text: #e6edf3;
+    --muted: #9aa8b8;
+    --accent: #4ea1ff;
+    --accent2: #ffb347;
+    --green: #3ddc84;
+    --red: #ff6b6b;
+    --purple: #b08bff;
+    --code-bg: #121c26;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --serif: Georgia, "Songti SC", "Noto Serif SC", serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.7;
+    font-size: 15px;
+  }
+  header.top {
+    padding: 40px 32px 28px;
+    max-width: 1080px;
+    margin: 0 auto;
+    border-bottom: 1px solid var(--border);
+  }
+  header.top h1 { font-size: 30px; margin: 0 0 6px; font-family: var(--serif); }
+  header.top .sub { color: var(--muted); }
+  header.top .addr { font-family: var(--mono); font-size: 12.5px; color: var(--accent); margin-top: 12px; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 32px 80px; }
+  .toc {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 24px;
+    margin: 28px 0 40px;
+  }
+  .toc h2 { margin: 0 0 12px; font-size: 16px; color: var(--accent); }
+  .toc ol { margin: 0; padding-left: 22px; columns: 2; column-gap: 40px; }
+  .toc a { color: var(--text); text-decoration: none; }
+  .toc a:hover { color: var(--accent); }
+  .toc li { margin: 3px 0; font-size: 14px; }
+  h2.sec {
+    font-size: 22px;
+    font-family: var(--serif);
+    border-left: 5px solid var(--accent);
+    padding-left: 12px;
+    margin-top: 52px;
+    margin-bottom: 18px;
+  }
+  h3 { font-size: 17px; color: var(--accent2); font-family: var(--serif); margin-top: 30px; }
+  p { margin: 14px 0; }
+  code {
+    font-family: var(--mono);
+    background: var(--code-bg);
+    color: var(--green);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+    word-break: break-word;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  pre code { background: none; color: inherit; padding: 0; }
+  .note {
+    border-left: 4px solid var(--accent2);
+    background: rgba(255,179,71,.07);
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin: 18px 0;
+  }
+  .warn {
+    border-left: 4px solid var(--red);
+    background: rgba(255,107,107,.07);
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin: 18px 0;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 22px 0;
+  }
+  .fig {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+    margin: 22px 0;
+    overflow-x: auto;
+  }
+  .fig .cap {
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 14px;
+  }
+  .legend { display: flex; gap: 22px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin-top: 14px; }
+  .legend b { font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--panel); color: var(--accent); }
+  tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+  details.sum {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin: 16px 0;
+    padding: 6px 16px;
+  }
+  details.sum summary { cursor: pointer; font-weight: 600; padding: 8px 0; color: var(--accent); }
+  .pill {
+    display: inline-block;
+    padding: 1px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-right: 8px;
+  }
+  .pill.g { background: rgba(61,220,132,.15); color: var(--green); }
+  .pill.o { background: rgba(255,179,71,.15); color: var(--accent2); }
+  .pill.p { background: rgba(176,139,255,.15); color: var(--purple); }
+  .pill.r { background: rgba(255,107,107,.15); color: var(--red); }
+  footer { text-align: center; color: var(--muted); font-size: 12.5px; padding: 30px; border-top: 1px solid var(--border); }
+  a.anchor { scroll-margin-top: 20px; }
+  .arrow-label { fill: var(--muted); font-size: 11.5px; font-family: var(--mono); }
+  .box-t { fill: var(--panel); stroke: var(--accent); }
+  .box-text { fill: var(--text); font-size: 13px; }
+  .inline-code { font-family: var(--mono); font-size: 11px; fill: var(--green); }
+  @media print {
+    body { background: #fff; color: #111; }
+    .fig, pre, .card { background: #fafafa; border-color: #ddd; }
+    header.top { border-bottom: 2px solid #333; }
+    .toc, .legend { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <h1>Beacon Reader / Writer 架构流程</h1>
+  <div class="sub">Qwen3.5 混合架构上的 Activation Beacon 压缩 —— Reader 读文档即弃，Writer 写回固定尺寸持久状态</div>
+  <div class="addr">实现依据：search_comp/models/beacon_qwen3.py · 2026-09-22 · 备注见<br>SEARCH_AGENT_BEACON_METHOD.md / WORKFLOW.md</div>
+</header>
+
+<div class="wrap">
+
+  <nav class="toc">
+    <h2>目录</h2>
+    <ol>
+      <li><a href="#s1">为什么需要 Reader / Writer</a></li>
+      <li><a href="#s2">总体运行流程</a></li>
+      <li><a href="#s3">窗口状态机：keep / compress</a></li>
+      <li><a href="#s4">Full-attention：Beacon 自注意力</a></li>
+      <li><a href="#s5">Linear-attention：<b>Reader</b>（读文档）</a></li>
+      <li><a href="#s6">Linear-attention：<b>Writer</b>（写回状态）</a></li>
+      <li><a href="#s7">一个压缩窗口的完整逐层过程</a></li>
+      <li><a href="#s8">压缩边界后的严格不变量</a></li>
+      <li><a href="#s9">梯度如何到达 Writer</a></li>
+      <li><a href="#s10">配置真实语义</a></li>
+    </ol>
+  </nav>
+
+  <!-- ============ S1 ============ -->
+  <h2 class="sec anchor" id="s1">1. 为什么需要 Reader / Writer</h2>
+  <p>Qwen3.5-2B 是混合 decoder：<b>24 层里 6 层 <code>full_attention</code></b>（标准 QKV 缓存，长度随上下文增长），其余 <b>18 层 <code>linear_attention</code></b>（GatedDeltaNet，固定尺寸循环状态）。</p>
+  <div class="card">
+    <p><span class="pill g">full_attention</span> 历史 → <code>K/V sequence cache</code> → 长度随上下文增长 → 需压缩成 Beacon K/V。</p>
+    <p><span class="pill p">linear_attention</span> 历史 → <code>recurrent matrix state + short conv state</code> → 尺寸固定，<b>但内容仍含全部历史</b>。</p>
+  </div>
+  <p>固定尺寸不代表“不含原始文档信息”。若压缩窗口结束后<b>直接保留</b>原生状态，后续 token 仍能读到原始文档 → 形成旁路：</p>
+  <div class="fig">
+    <svg viewBox="0 0 900 190" width="100%" role="img" aria-label="旁路与正确路径对比">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#ff6b6b"/></marker>
+        <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#3ddc84"/></marker>
+      </defs>
+      <text x="20" y="30" fill="#ff6b6b" font-size="15" font-weight="bold">旁路（不允许）</text>
+      <rect class="box-t" x="40" y="55" width="140" height="46" rx="8"/>
+      <text class="box-text" x="110" y="82" text-anchor="middle">原始文档</text>
+      <rect class="box-t" x="300" y="55" width="200" height="46" rx="8" stroke="#ff6b6b"/>
+      <text class="box-text" x="400" y="82" text-anchor="middle">原生 DeltaNet state</text>
+      <rect class="box-t" x="620" y="55" width="160" height="46" rx="8" stroke="#ff6b6b"/>
+      <text class="box-text" x="700" y="82" text-anchor="middle">后续 answer</text>
+      <line x1="180" y1="78" x2="298" y2="78" stroke="#ff6b6b" marker-end="url(#ar)" stroke-width="2"/>
+      <line x1="500" y1="78" x2="618" y2="78" stroke="#ff6b6b" marker-end="url(#ar)" stroke-width="2"/>
+      <text x="20" y="150" fill="#3ddc84" font-size="15" font-weight="bold">唯一允许路径</text>
+      <rect class="box-t" x="40" y="140" width="140" height="46" rx="8"/>
+      <text class="box-text" x="110" y="167" text-anchor="middle">原始文档</text>
+      <rect class="box-t" x="300" y="140" width="200" height="46" rx="8" stroke="#ffb347" stroke-width="2"/>
+      <text class="box-text" x="400" y="161" text-anchor="middle">Beacon hidden</text>
+      <text class="inline-code" x="400" y="178" text-anchor="middle">激活</text>
+      <rect class="box-t" x="620" y="120" width="160" height="42" rx="8" stroke="#3ddc84"/>
+      <text class="box-text" x="700" y="147" text-anchor="middle">Writer 循环状态</text>
+      <rect class="box-t" x="620" y="176" width="160" height="42" rx="8" stroke="#3ddc84"/>
+      <text class="box-text" x="700" y="203" text-anchor="middle">Beacon QKV</text>
+      <line x1="180" y1="163" x2="298" y2="163" stroke="#3ddc84" marker-end="url(#ag)" stroke-width="2"/>
+      <line x1="500" y1="163" x2="618" y2="141" stroke="#3ddc84" marker-end="url(#ag)" stroke-width="2"/>
+      <line x1="500" y1="163" x2="618" y2="197" stroke="#3ddc84" marker-end="url(#ag)" stroke-width="2"/>
+      <line x1="780" y1="162" x2="860" y2="162" stroke="#3ddc84" marker-end="url(#ag)" stroke-width="2" stroke-dasharray="5,4"/>
+      <rect class="box-t" x="858" y="141" width="90" height="42" rx="8"/>
+      <text class="box-text" x="903" y="166" text-anchor="middle">后续 token</text>
+      <text class="inline-code" x="700" y="188" text-anchor="start" fill="#4ea1ff">压缩载体（唯一）</text>
+    </svg>
+    <div class="cap">图1　删除 full-attention K/V 不足以防泄漏：linear 原生状态若保留，原始文档仍能绕过 Beacon 影响后续生成。</div>
+  </div>
+</div><!-- /wrap 临时 -->
+
+<div class="wrap">
+  <!-- ============ S2 ============ -->
+  <h2 class="sec anchor" id="s2">2. 总体运行流程</h2>
+  <p>入口是 <code>BeaconQwen3_5ForCausalLM.forward</code> → 驱动 <code>_Qwen3BeaconMemory</code> 状态机。</p>
+  <div class="fig">
+    <svg viewBox="0 0 920 360" width="100%" role="img" aria-label="总体运行流程">
+      <defs>
+        <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#4ea1ff"/></marker>
+      </defs>
+      <rect class="box-t" x="380" y="20" width="180" height="44" rx="8"/>
+      <text class="box-text" x="470" y="47" text-anchor="middle">Question + 搜索指令</text>
+      <rect class="box-t" x="380" y="90" width="180" height="44" rx="8" stroke="#ffb347"/>
+      <text class="box-text" x="470" y="117" text-anchor="middle">Qwen3.5 生成</text>
+      <line x1="470" y1="64" x2="470" y2="88" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="70" y="175" width="150" height="42" rx="8" stroke="#3ddc84" stroke-width="2"/>
+      <text class="box-text" x="145" y="202" text-anchor="middle">&lt;search&gt;…&lt;/search&gt;</text>
+      <rect class="box-t" x="70" y="120" width="150" height="44" rx="8"/>
+      <text class="box-text" x="145" y="147" text-anchor="middle">仍缺证据</text>
+      <line x1="380" y1="120" x2="222" y2="120" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <line x1="145" y1="165" x2="145" y2="175" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="70" y="235" width="150" height="42" rx="8"/>
+      <text class="box-text" x="145" y="262" text-anchor="middle">BM25 检索器</text>
+      <line x1="145" y1="217" x2="145" y2="233" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="70" y="295" width="170" height="44" rx="8" stroke="#4ea1ff" stroke-width="2"/>
+      <text class="box-text" x="155" y="312" text-anchor="middle">&lt;information&gt; 文档</text>
+      <text class="inline-code" x="155" y="330" text-anchor="middle" fill="#4ea1ff">&lt;/information&gt;</text>
+      <line x1="218" y1="317" x2="330" y2="317" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="332" y="300" width="170" height="40" rx="8"/>
+      <text class="box-text" x="417" y="317" text-anchor="middle">记录为 regions</text>
+      <text class="inline-code" x="417" y="334" text-anchor="middle">token 区间</text>
+      <line x1="502" y1="320" x2="600" y2="320" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="602" y="290" width="178" height="44" rx="8" stroke="#ffb347" stroke-width="2"/>
+      <text class="box-text" x="691" y="312" text-anchor="middle">_Qwen3BeaconMemory</text>
+      <text class="inline-code" x="691" y="328" text-anchor="middle">窗口状态机</text>
+      <line x1="691" y1="290" x2="691" y2="165" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <line x1="470" y1="134" x2="691" y2="160" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <!-- 两条压缩载体反馈 -->
+      <rect class="box-t" x="800" y="175" width="120" height="52" rx="8" stroke="#3ddc84"/>
+      <text class="box-text" x="860" y="196" text-anchor="middle">full-attn</text>
+      <text class="box-text" x="860" y="214" text-anchor="middle">Beacon K/V</text>
+      <rect class="box-t" x="800" y="245" width="120" height="52" rx="8" stroke="#3ddc84"/>
+      <text class="box-text" x="860" y="266" text-anchor="middle">linear-attn</text>
+      <text class="box-text" x="860" y="284" text-anchor="middle">writer 状态</text>
+      <line x1="780" y1="310" x2="860" y2="299" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <line x1="691" y1="320" x2="798" y2="288" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <line x1="860" y1="227" x2="600" y2="112" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2" stroke-dasharray="5,4"/>
+      <line x1="860" y1="297" x2="600" y2="118" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2" stroke-dasharray="5,4"/>
+      <rect class="box-t" x="380" y="90" width="0" height="0"/>
+      <rect class="box-t" x="690" y="90" width="150" height="40" rx="8" stroke="#3ddc84"/>
+      <text class="box-text" x="765" y="115" text-anchor="middle">answer</text>
+      <line x1="560" y1="112" x2="688" y2="112" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="690" y="175" width="104" height="0"/>
+      <rect class="box-t" x="70" y="120" width="0" height="0"/>
+    </svg>
+    <div class="cap">图2　在线搜索循环：<code>&lt;search&gt;</code> → 检索 → <code>&lt;information&gt;</code> → Beacon 压缩 → 续生成，直到 <code>&lt;answer&gt;</code>。</div>
+  </div>
+  <p>主循环 <code>_beacon_forward()</code>（<code>beacon_qwen3.py:708</code>）伪代码：</p>
+  <pre><code>prepare()        # 全序列 + regions → 切成 keep / compress 交替 segment
+while not memory.finish:
+    step()             # 切一个窗口（含追加的 beacon token）
+    _native_forward()  # 逐层前向
+        full_attention 层 → BeaconQwen3Attention（Beacon 自注意力）
+        linear_attention 层 → Reader + Writer
+    update_memory()    # full-attn 层选择提交 beacon K/V 或全量 K/V
+output()               # 汇总跨窗口累积的 loss</code></pre>
+</div>
+
+<div class="wrap">
+  <!-- ============ S3 ============ -->
+  <h2 class="sec anchor" id="s3">3. 窗口状态机：keep / compress</h2>
+  <p><code>prepare()</code>（<code>beacon_qwen3.py:302</code>）把序列在 token 空间切成片段。给定文档区间 <code>regions=[(s₁,e₁),(s₂,e₂),…]</code>：</p>
+  <pre><code>[(0, s₁,      keep),
+ (s₁, e₁,    compress),
+ (e₁, s₂,    keep),
+ (s₂, e₂,    compress),
+ …
+ (last_end, L, keep)]</code></pre>
+  <p><code>step()</code>（<code>beacon_qwen3.py:323</code>）按 <code>beacon_window</code> 切当前窗口并定策略：</p>
+  <table>
+    <tr><th>段模式</th><th>Beacon 数</th><th>store</th><th>说明</th></tr>
+    <tr><td><b>keep</b></td><td>0</td><td><code>cache</code></td><td>整窗口 K/V 全部保留（问题/think/search/answer）</td></tr>
+    <tr><td><b>compress·满窗口</b></td><td><code>window/ratio</code></td><td><code>beacon</code></td><td>末尾追加 beacon，只压缩文档正文</td></tr>
+    <tr><td><b>compress·尾部</b></td><td><code>max(1, ceil(rem/ratio))</code></td><td><code>beacon</code></td><td>不足一片也压缩，保证任意长度文档都被覆盖</td></tr>
+  </table>
+  <p>窗口 token 从 <code>[d₁..d_D]</code> 扩展为 <code>[d₁..d_D, b₁..b_B]</code>；Beacon 用虚拟 id <code>vocab_size</code>，由独立 <code>beacon_embed_tokens</code> 嵌入（初始化自 EOS，可训练）。<code>_step_beacon_indices</code> 同步标记：</p>
+  <pre><code>[0, 0, …, 0, 1, 1, …, 1]   # 0 = 普通 token，1 = beacon</code></pre>
+  <p><code>beacon_pos="intersect"</code> 时（<code>beacon_qwen3.py:365</code>），改为每个 chunk 内每 <code>ratio</code> 个 token 后插入一个 beacon（见 <code>beacon_intersect_order</code>），掩码在 chunk 内保留完整因果可见性。</p>
+</div>
+
+<div class="wrap">
+  <!-- ============ S4 ============ -->
+  <h2 class="sec anchor" id="s4">4. Full-attention：Beacon 自注意力（<code>BeaconQwen3Attention</code>）</h2>
+  <div class="card">
+    <p><b>分区投影</b>：普通 token 用预训练 <code>q/k/v/o_proj</code>；Beacon 位置用独立可训练 <code>beacon_{q,k,v,o}_proj</code>，经 <code>torch.where(bi==0, original, beacon)</code> token 级切换（<code>_qkv</code>，<code>beacon_qwen3.py:135</code>）。<code>beacon_param</code> 决定哪些投影独立，<b>默认 <code>q k v</code></b>。注意 Qwen3.5 的 <code>q_proj</code> 同时输出 query 与 gate，gate 随 query 一并切换。</p>
+    <p><b>RoPE 前缓存</b>：持久 cache 存 RoPE 之前的 K/V，每窗口把 <code>past+current</code> 整体重施加 mRoPE（<code>beacon_qwen3.py:226</code>），query 只用末尾 <code>cur_len</code> 位置。</p>
+    <p><b>提交</b>（<code>update_memory</code>，<code>beacon_qwen3.py:407</code>）：compress 窗口只 <code>slice</code> 出 Beacon K/V 入持久 cache；keep 窗口全量追加。原始文档 K/V 只存在于当前窗口内部，窗口结束即丢弃。</p>
+  </div>
+  <div class="fig">
+    <svg viewBox="0 0 680 440" width="100%" role="img" aria-label="full attention 时序">
+      <rect class="box-t" x="20" y="20" width="150" height="40" rx="8"/>
+      <text class="box-text" x="95" y="46" text-anchor="middle">_Qwen3BeaconMemory</text>
+      <rect class="box-t" x="240" y="20" width="180" height="40" rx="8" stroke="#ffb347"/>
+      <text class="box-text" x="330" y="46" text-anchor="middle">BeaconQwen3Attention</text>
+      <rect class="box-t" x="500" y="20" width="160" height="40" rx="8"/>
+      <text class="box-text" x="580" y="46" text-anchor="middle">_cache[layer]</text>
+      <!-- arrows down -->
+      <line x1="95" y1="60" x2="95" y2="90" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <text class="arrow-label" x="180" y="85">hidden, mask, past(4元组)</text>
+      <line x1="330" y1="60" x2="330" y2="100" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="240" y="105" width="180" height="34" rx="6"/>
+      <text class="box-text" x="330" y="128" text-anchor="middle">_qkv 按 beacon 切换投影</text>
+      <line x1="330" y1="139" x2="330" y2="158" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="240" y="160" width="180" height="34" rx="6"/>
+      <text class="box-text" x="330" y="183" text-anchor="middle">cat(past,cur) → 整体 mRoPE</text>
+      <line x1="330" y1="194" x2="330" y2="213" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="240" y="215" width="180" height="34" rx="6"/>
+      <text class="box-text" x="330" y="238" text-anchor="middle">causal softmax * sigmoid(gate)</text>
+      <line x1="330" y1="249" x2="330" y2="285" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <text class="arrow-label" x="110" y="282">new_past: 增量 RoPE前 (k,v,bs,idx)</text>
+      <!-- loop to get back cache -->
+      <line x1="95" y1="250" x2="95" y2="320" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="20" y="322" width="190" height="50" rx="8" stroke="#3ddc84" stroke-width="2"/>
+      <text class="box-text" x="115" y="344" text-anchor="middle">store==beacon ?</text>
+      <text class="box-text" x="115" y="362" text-anchor="middle">只取 K/V : 全量 K/V</text>
+      <line x1="210" y1="347" x2="498" y2="347" stroke="#3ddc84" marker-end="url(#ab)" stroke-width="2"/>
+      <text class="arrow-label" x="330" y="340">仅 beacon K/V 或全量</text>
+      <line x1="580" y1="60" x2="580" y2="347" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="500" y="362" width="160" height="40" rx="8" stroke="#3ddc84"/>
+      <text class="box-text" x="580" y="388" text-anchor="middle">concat 进持久 cache</text>
+    </svg>
+    <div class="cap">图3　full-attention 层窗口前向与提交（<code>update_memory</code>）。</div>
+  </div>
+</div>
+
+<div class="wrap" id="s5block">
+  <!-- ============ S5 ============ -->
+  <h2 class="sec anchor" id="s5">5. Linear-attention 层：<span class="pill r">Reader</span>（读文档）</h2>
+  <p><code>_linear_attention_forward()</code>（<code>beacon_qwen3.py:661</code>）是<b>显式、可微分</b>的 GatedDeltaNet 前向，彻底摆脱 HuggingFace <code>DynamicCache</code> 的隐式跨窗口状态：</p>
+  <pre><code>P = in_proj_qkv(H)
+P_context = concat(C_prev, P)                 # causal conv 左上下文
+Mixed = SiLU(DepthwiseCausalConv(P_context))
+[Q, K, V] = split(Mixed)
+beta = sigmoid(in_proj_b(H))
+g    = -exp(A_log) * softplus(in_proj_a(H) + dt_bias)
+[O, S_reader] = GatedDeltaRule(Q, K, V, g, beta, initial_state=S_prev)
+O    = out_proj(gated_rmsnorm(O, in_proj_z))</code></pre>
+  <p>产出 <code>reader_recurrent</code>（<code>next_recurrent</code>）与 <code>reader_conv</code>（<code>next_conv</code>）两个<b>临时</b>状态。</p>
+  <div class="warn">
+    <b>关键在“临时”。</b>（<code>_native_forward</code>，<code>beacon_qwen3.py:587-599</code>）：
+    <pre><code>keep 段:      initial = previous_recurrent            # 直接继续累积
+compress 段:  initial = previous_recurrent.clone()    # 拷贝当初始态，读完丢弃</code></pre>
+    <code>clone()</code> 保证文档窗口对原生状态 <code>previous_recurrent</code> <b>不产生 in-place 污染</b>。Reader 读完文档、Beacon 能读到文档信息，但原生状态不提交。
+  </div>
+</div>
+
+<div class="wrap" id="s6block">
+  <!-- ============ S6 ============ -->
+  <h2 class="sec anchor" id="s6">6. Linear-attention 层：<span class="pill g">Writer</span>（写回持久状态）</h2>
+
+  <h3>6.1 触发与输入</h3>
+  <p>compress 窗口完成该层 attention residual + MLP 后，取该层 Beacon 位置输出隐状态（<code>beacon_qwen3.py:605-614</code>）：</p>
+  <pre><code>B_l = hidden[:, _step_beacon_indices.bool()]            # beacon 位置隐状态
+_linear_recurrent[idx] = writer(B_l, previous_recurrent) # 写回持久状态
+_linear_conv.pop(idx, None)                              # 清空卷积尾状态</code></pre>
+  <p><code>B_l</code> 已融合当前文档窗口、历史 keep/Beacon memory、该层 reader 输出与 MLP —— writer <b>不直接读原始 token state，只读 decoder 形成的 Beacon 激活</b>。</p>
+
+  <h3>6.2 低秩参数化（<code>BeaconLinearStateWriter</code>，<code>beacon_qwen3.py:40</code>）</h3>
+  <pre><code>Z = Up(SiLU(Down(LayerNorm(B_l))))      # hidden → rank → heads*(k+v+decay+beta)
+[key, value, decay, beta] = split(Z)</code></pre>
+  <p><code>Down: hidden→rank</code>（<code>beacon_linear_writer_rank</code>，默认 128）是低秩瓶颈，writer 因此可训练且量可控。初始 <code>up.bias</code> 置零、decay bias 段填 <code>4.0</code>（<code>sigmoid(4.0)≈0.982</code>），让 writer 一开始尽量保持状态稳定。</p>
+
+  <h3>6.3 状态更新（FP32，顺序叠加每个 beacon）</h3>
+  <div class="fig">
+    <svg viewBox="0 0 820 250" width="100%" role="img" aria-label="writer 更新数学">
+      <rect class="box-t" x="20" y="40" width="200" height="46" rx="8" stroke="#ffb347"/>
+      <text class="box-text" x="120" y="63" text-anchor="middle">Beacon hidden B_l</text>
+      <text class="inline-code" x="120" y="80" text-anchor="middle">融合文档+history+MLP</text>
+      <rect class="box-t" x="300" y="40" width="220" height="46" rx="8"/>
+      <text class="box-text" x="410" y="63" text-anchor="middle">低秩 MLP → 分量</text>
+      <text class="inline-code" x="410" y="80" text-anchor="middle">k v decay beta</text>
+      <line x1="220" y1="63" x2="298" y2="63" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="20" y="150" width="200" height="46" rx="8" stroke="#3ddc84"/>
+      <text class="box-text" x="120" y="173" text-anchor="middle">S_prev（进入窗前持久态）</text>
+      <text class="inline-code" x="120" y="190" text-anchor="middle">非 S_reader !</text>
+      <rect class="box-t" x="300" y="140" width="240" height="70" rx="8" stroke="#3ddc84" stroke-width="2"/>
+      <text class="box-text" x="420" y="162" text-anchor="middle">S ← d_b·S</text>
+      <text class="box-text" x="420" y="182" text-anchor="middle">p_b = Sᵀk_b</text>
+      <text class="box-text" x="420" y="200" text-anchor="middle">S ← S + k_b·(β_b·(v_b−p_b))ᵀ</text>
+      <text class="inline-code" x="420" y="0" text-anchor="middle"></text>
+      <line x1="220" y1="165" x2="298" y2="165" stroke="#3ddc84" marker-end="url(#ab)" stroke-width="2"/>
+      <line x1="520" y1="140" x2="600" y2="120" stroke="#3ddc84" marker-end="url(#ab)" stroke-width="2"/>
+      <line x1="540" y1="175" x2="610" y2="175" stroke="#3ddc84" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="600" y="100" width="190" height="46" rx="8" stroke="#3ddc84"/>
+      <text class="box-text" x="695" y="123" text-anchor="middle">S_new（持久状态）</text>
+      <rect class="box-t" x="600" y="160" width="190" height="34" rx="8"/>
+      <text class="box-text" x="695" y="183" text-anchor="middle">_linear_recurrent[idx]</text>
+    </svg>
+    <div class="cap">图4　Writer 状态更新（FP32，逐 beacon 顺序叠加）。</div>
+  </div>
+  <p>初始 <code>S</code> 是<b>压缩窗口进入前</b>的持久状态（不是吸收过文档的 <code>S_reader</code>）；不存在则全零。整个叠加以 FP32 维护，降低长序列累积的数值风险。</p>
+
+  <h3>6.4 卷积状态处理</h3>
+  <p>compress 窗口结束即 <code>delete _linear_conv[idx]</code>：卷积尾状态直接含最近若干 projected token，若保留会明确残留原始文档或 Beacon 邻 token。下一段从零卷积左上下文开始，仍可通过 writer recurrent state 与 full-attention Beacon K/V 使用压缩记忆 —— 为严格边界接受的局部连续性折中。</p>
+  <p><b>keep 窗口</b>相反：reader recurrent + conv 状态都直接提交（<code>beacon_qwen3.py:612-614</code>）。</p>
+
+  <div class="fig">
+    <svg viewBox="0 0 840 190" width="100%" role="img" aria-label="reader/writer 对比">
+      <rect class="box-t" x="30" y="20" width="180" height="46" rx="8"/>
+      <text class="box-text" x="120" y="47" text-anchor="middle">Reader：临时状态</text>
+      <rect class="box-t" x="330" y="20" width="180" height="46" rx="8" stroke="#ffb347"/>
+      <text class="box-text" x="420" y="47" text-anchor="middle">Writer：持久状态</text>
+      <rect class="box-t" x="30" y="120" width="180" height="36" rx="6"/>
+      <text class="box-text" x="120" y="143" text-anchor="middle">文档窗口 H</text>
+      <rect class="box-t" x="330" y="120" width="180" height="36" rx="6" stroke="#ffb347"/>
+      <text class="box-text" x="420" y="143" text-anchor="middle">Beacon hidden B_l</text>
+      <text x="120" y="120" text-anchor="middle" class="arrow-label" fill="#ff6b6b">读完即弃</text>
+      <line x1="120" y1="90" x2="120" y2="118" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <line x1="420" y1="90" x2="420" y2="118" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="600" y="120" width="200" height="46" rx="8" stroke="#3ddc84"/>
+      <text class="box-text" x="700" y="143" text-anchor="middle">S_new → _linear_recurrent</text>
+      <line x1="510" y1="138" x2="598" y2="143" stroke="#3ddc84" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="600" y="60" width="200" height="38" rx="8"/>
+      <text class="box-text" x="700" y="84" text-anchor="middle">S_prev 持久态（进入窗前）</text>
+      <line x1="620" y1="98" x2="640" y2="118" stroke="#3ddc84" marker-end="url(#ab)" stroke-width="2"/>
+      <text x="30" y="200" fill="#ff6b6b" font-size="12" class="inline-code">S_reader / C_reader 丢弃</text>
+      <text x="330" y="200" fill="#3ddc84" font-size="12" class="inline-code">C_conv 丢弃，recurrent 写回</text>
+    </svg>
+    <div class="cap">图5　Reader 与 Writer 分工：Reader 读即弃，Writer 由 Beacon 激活写回持久态。</div>
+  </div>
+</div>
+
+<div class="wrap" id="s7block">
+  <!-- ============ S7 ============ -->
+  <h2 class="sec anchor" id="s7">7. 一个压缩窗口的完整逐层过程</h2>
+  <p>设窗口含 <code>D</code> 个文档 token、<code>B</code> 个 Beacon，一次 <code>_native_forward()</code>：</p>
+  <details class="sum" open>
+    <summary>第 l 层内部 Decision</summary>
+    <pre><code>1. Embedding
+   document ids → original embedding
+   beacon virtual ids → beacon_embed_tokens（自 EOS 初始化，可训练）
+
+2. For layer l = 1 .. N
+   a. input layer norm
+
+   b1. if full_attention:
+       普通/Beacon 分区投影 → cat 持久 K/V → 整体 mRoPE + causal attention
+       保留当前窗口增量 K/V（RoPE 前）暂缓提交
+
+   b2. if linear_attention:
+       initial = previous_recurrent            # keep：直接续
+       initial = previous_recurrent.clone()    # compress：reader 临时拷贝
+       显式 causal conv + GatedDeltaNet reader → 临时 reader_recurrent/conv
+
+   c. attention residual
+   d. post-attention norm + MLP residual
+
+   e. if linear_attention 且当前窗口是 compress:
+       beacon_hidden = hidden[beacon_mask]
+       writer(beacon_hidden, pre-window state) → commit 持久状态
+       丢弃临时 conv 状态
+
+   f. if linear_attention 且当前窗口是 keep:
+       commit reader recurrent + conv 状态
+
+3. final model norm + LM head
+
+4. full_attention memory commit（由状态机统一执行）
+   compress: 只追加 Beacon K/V；keep: 追加全部 K/V
+
+5. loss 累积（只对非 -100 位置，即生成片段）</code></pre>
+  </details>
+  <p>linear writer 每个 linear layer 内<b>立即提交</b>该层状态；full-attention K/V 在整个模型窗口前向完成后由状态机<b>统一选择并追加</b>。</p>
+</div>
+
+<div class="wrap" id="s8block">
+  <!-- ============ S8 ============ -->
+  <h2 class="sec anchor" id="s8">8. 压缩边界后的严格不变量</h2>
+  <p>对任意已完成压缩的 <code>&lt;information&gt;</code> 窗口，持久 memory 必须满足：</p>
+  <pre><code>M_persistent = {
+    full_attention: Beacon K/V only,
+    linear_attention: writer recurrent state only,
+    convolution: 无该压缩窗口的任何状态
+}</code></pre>
+  <div class="warn">
+    <b>不存在</b>：文档 full-attention K/V · 文档窗口原生 GatedDeltaNet final state ·
+    窗口尾部因果卷积 state · HuggingFace <code>DynamicCache</code> 隐藏旁路。
+  </div>
+  <p>因此压缩窗口到后续生成的计算图只能经过 Beacon 载体：</p>
+  <div class="fig">
+    <svg viewBox="0 0 900 90" width="100%" role="img" aria-label="不变量路径">
+      <rect class="box-t" x="20" y="24" width="150" height="44" rx="8"/>
+      <text class="box-text" x="95" y="51" text-anchor="middle">文档</text>
+      <rect class="box-t" x="250" y="24" width="190" height="44" rx="8" stroke="#ffb347" stroke-width="2"/>
+      <text class="box-text" x="345" y="51" text-anchor="middle">Beacon hidden</text>
+      <rect class="box-t" x="500" y="10" width="170" height="36" rx="8" stroke="#3ddc84"/>
+      <text class="box-text" x="585" y="33" text-anchor="middle">full-attn Beacon K/V</text>
+      <rect class="box-t" x="500" y="58" width="170" height="36" rx="8" stroke="#3ddc84"/>
+      <text class="box-text" x="585" y="81" text-anchor="middle">writer 循环状态</text>
+      <line x1="170" y1="46" x2="248" y2="46" stroke="#4ea1ff" marker-end="url(#ab)" stroke-width="2"/>
+      <line x1="440" y1="46" x2="498" y2="38" stroke="#3ddc84" marker-end="url(#ab)" stroke-width="2"/>
+      <line x1="440" y1="46" x2="498" y2="52" stroke="#3ddc84" marker-end="url(#ab)" stroke-width="2"/>
+      <rect class="box-t" x="740" y="24" width="140" height="44" rx="8" stroke="#3ddc84" stroke-width="2"/>
+      <text class="box-text" x="810" y="51" text-anchor="middle">后续 think/search/answer</text>
+      <line x1="670" y1="36" x2="738" y2="42" stroke="#3ddc84" marker-end="url(#ab)" stroke-width="2"/>
+      <line x1="670" y1="62" x2="738" y2="50" stroke="#3ddc84" marker-end="url(#ab)" stroke-width="2"/>
+    </svg>
+    <div class="cap">图6　压缩边界后的唯一信息流。</div>
+  </div>
+</div>
+
+<div class="wrap" id="s9block">
+  <!-- ============ S9 ============ -->
+  <h2 class="sec anchor" id="s9">9. 梯度如何到达 Writer</h2>
+  <p>文档与 Beacon 位置均为 <code>-100</code>，没有直接 LM loss。梯度经后续 answer loss 传播：</p>
+  <pre><code>answer loss
+  -> 后段 linear-attention 输出
+  -> 持久 writer recurrent state
+  -> BeaconLinearStateWriter
+  -> Beacon hidden states
+  -> 文档 reader 激活</code></pre>
+  <p>所以 Beacon 表示学习的是<b>“对后续 reasoning/search/answer 有用的信息”</b>，而非重建全部文档。测试 <code>test_linear_writer_receives_gradient_from_post_compression_tokens</code> 验证了压缩后 token 的 loss 能到达 linear writer。LoRA 训练时 <code>beacon*</code> 参数被重新设 <code>requires_grad=True</code>，全量训练。</p>
+</div>
+
+<div class="wrap" id="s10block">
+  <!-- ============ S10 ============ -->
+  <h2 class="sec anchor" id="s10">10. 配置真实语义（Reader/Writer 相关）</h2>
+  <table>
+    <tr><th>参数</th><th>作用</th></tr>
+    <tr><td><code>beacon_window</code></td><td>文档 / keep 段单次处理窗口长度</td></tr>
+    <tr><td><code>beacon_ratio</code></td><td>每约 r 个原始文档 token 生成 1 个 Beacon</td></tr>
+    <tr><td><code>beacon_param</code></td><td>Beacon 独立使用哪些 full-attention 投影（默认 <code>q k v</code>）</td></tr>
+    <tr><td><code>beacon_pos</code></td><td><code>append</code>（窗口尾追加）或 <code>intersect</code>（chunk 内每 ratio 插入）</td></tr>
+    <tr><td><code>beacon_linear_writer_rank</code></td><td>linear state writer 低秩瓶颈，控制参数量与表达力（默认 128）</td></tr>
+    <tr><td><code>beacon_embed_init</code></td><td>Beacon embedding 从 EOS / BOS 初始化</td></tr>
+  </table>
+
+  <div class="note">
+    <b>一句话总结：</b>Reader 在压缩窗口内<b>临时</b>读完检索文档后即弃；Writer 只从 Beacon
+    激活经低秩网络重建<b>固定尺寸的持久循环状态</b>。配合 full-attention 层只提交 Beacon
+    K/V，后续 reasoning、继续搜索与回答统一使用 Beacon 压缩记忆，彻底杜绝原始文档在
+    Qwen3.5 线性注意力状态中的旁路。
+  </div>
+</div>
+
+<footer>
+  Search-Comp Qwen3.5 · Beacon Reader/Writer 架构 · 由 <code>search_comp/models/beacon_qwen3.py</code> 真实实现归纳生成
+</footer>
+
+</body>
+</html>

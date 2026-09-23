@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import torch
+import pytest
 
 from search_comp.data.retrieval import format_docs_as_reference
 from search_comp.data.trajectory import INFO_PREFIX, INFO_SUFFIX, build_search_chat_prompt
@@ -16,11 +17,13 @@ class _CharacterTokenizer:
         return "".join(chr(token) for token in tokens)
 
 
-def test_agent_reuses_cache_only_for_new_retrievals_and_resets_between_questions():
+@pytest.mark.parametrize("question_memory_v1", [False, True])
+def test_agent_reuses_cache_only_for_new_retrievals_and_resets_between_questions(question_memory_v1):
     tokenizer = _CharacterTokenizer()
     model = Mock()
     model.parameters.side_effect = lambda: iter([torch.zeros(1)])
     model.beacon_config.beacon_ratio = 2
+    model.beacon_config.beacon_question_memory_v1 = question_memory_v1
     outputs = ["<search>first</search>", "<search>second</search>", "<answer>done</answer>"]
     model.beacon_generate.side_effect = [
         torch.tensor([tokenizer(text).input_ids]) for text in outputs * 2
@@ -36,6 +39,10 @@ def test_agent_reuses_cache_only_for_new_retrievals_and_resets_between_questions
     expected_addition = INFO_PREFIX + docs + INFO_SUFFIX
     for call_index, call in enumerate(model.beacon_generate.call_args_list):
         arguments = call.kwargs
+        if question_memory_v1:
+            assert tokenizer.decode(arguments["question_input_ids"][0].tolist()) == "Question?"
+        else:
+            assert "question_input_ids" not in arguments
         actual_input = tokenizer.decode(arguments["input_ids"][0].tolist())
         assert arguments["attention_mask"].shape == arguments["input_ids"].shape
         if call_index % 3 == 0:

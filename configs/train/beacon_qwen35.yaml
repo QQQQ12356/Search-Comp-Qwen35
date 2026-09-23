@@ -41,6 +41,9 @@ lora_target_modules:
 gradient_checkpointing: false  # 显式混合状态路径当前不做层级重计算
 beacon:
   enable_beacon: true
+  beacon_question_memory_v1: false
+  beacon_question_max_tokens: 128
+  beacon_readout_distill_weight: 0.1
   beacon_window: 256
   beacon_stride: 256
   beacon_ratio: 32

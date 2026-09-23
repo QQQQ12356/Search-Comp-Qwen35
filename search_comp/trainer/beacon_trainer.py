@@ -186,7 +186,7 @@ def main_train(
         # beacon 投影（beacon_*_proj / beacon_embed_tokens）保持全量可训练。
         # 关键：get_peft_model 会把所有基础参数 requires_grad=False（含 beacon），
         # 若不重新开启，loss 将不连接任何可训练参数，backward 报
-        # "element 0 ... does not require grad"。
+
         for name, param in model.named_parameters():
             if "beacon" in name:
                 param.requires_grad = True
@@ -207,7 +207,7 @@ def main_train(
         train_ds = SearchR1SFTDataset(
             cfg["train_data_path"], tokenizer
         )
-        collator = SearchR1Collator(tokenizer)  # bs=1
+        collator = SearchR1Collator(tokenizer, question_memory_v1=beacon_cfg.beacon_question_memory_v1)
         eval_ds = (
             SearchR1SFTDataset(cfg["val_data_path"], tokenizer)
             if cfg.get("val_data_path") else None
@@ -217,7 +217,7 @@ def main_train(
         train_ds = InteractiveSFTDataset(
             cfg["train_data_path"], tokenizer, max_length=cfg.get("max_length", 8192)
         )
-        collator = InteractiveCollator(tokenizer)  # bs=1
+        collator = InteractiveCollator(tokenizer, question_memory_v1=beacon_cfg.beacon_question_memory_v1)
         eval_ds = (
             InteractiveSFTDataset(
                 cfg["val_data_path"], tokenizer, max_length=cfg.get("max_length", 8192)
@@ -249,7 +249,7 @@ def main_train(
 
     args = TrainingArguments(
         output_dir=exp_dir,
-        per_device_train_batch_size=1,          # collator 强制 bs=1，靠 grad_accum 扩大有效 batch
+        per_device_train_batch_size=1,          # collator 强制 bs=1，通过grad_accum 扩大有效 batch
         gradient_accumulation_steps=grad_accum,
         learning_rate=cfg.get("learning_rate", 5e-5),
         weight_decay=cfg.get("weight_decay", 0.01),

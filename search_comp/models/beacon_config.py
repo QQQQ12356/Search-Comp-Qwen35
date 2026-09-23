@@ -48,6 +48,9 @@ class BeaconConfig:
     eval_beacon_ratio: Optional[int] = None
     #: 线性注意力层的 Beacon-only 状态写入器秩
     beacon_linear_writer_rank: int = 128
+    beacon_question_memory_v1: bool = False
+    beacon_question_max_tokens: int = 128
+    beacon_readout_distill_weight: float = 0.1
     #: 训练 loss 的有效 token 分块大小；避免一次生成超大词表 logits
     beacon_loss_chunk_size: int = 64
     #: loss 分块是否使用 activation checkpoint，在反向时重算 LM head
@@ -59,6 +62,10 @@ class BeaconConfig:
 
     def __post_init__(self) -> None:
         """校验参数合法性。"""
+        if self.beacon_question_max_tokens <= 0:
+            raise ValueError("beacon_question_max_tokens 必须为正数")
+        if not 0 <= self.beacon_readout_distill_weight < float("inf"):
+            raise ValueError("beacon_readout_distill_weight 必须为有限非负数")
         if self.enable_beacon:
             assert (
                 self.beacon_window >= self.beacon_stride

@@ -66,6 +66,7 @@ class InteractiveSFTDataset(Dataset):
         labels = build_loss_labels(len(ids), ids, gen_spans)
         return {
             "input_ids": ids,
+            "question": question,
             "labels": labels,
             "regions": doc_regions,
             "n_turns": len(sample["turns"]),
@@ -82,7 +83,9 @@ class InteractiveCollator:
         tokenizer: HuggingFace tokenizer（用于 pad_token_id）。
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizer):
+    def __init__(self, tokenizer: PreTrainedTokenizer, question_memory_v1: bool = False):
+        self.tokenizer = tokenizer
+        self.question_memory_v1 = question_memory_v1
         self.pad_token_id = tokenizer.pad_token_id
         if self.pad_token_id is None:
             raise ValueError("tokenizer 缺少 pad_token，请先设置 pad_token")
@@ -111,4 +114,7 @@ class InteractiveCollator:
             "attention_mask": attention_mask,
             "labels": labels,
             "regions": f["regions"],
+            **({"question_input_ids": torch.tensor([
+                self.tokenizer(f["question"], add_special_tokens=False).input_ids
+            ], dtype=torch.long)} if self.question_memory_v1 else {}),
         }

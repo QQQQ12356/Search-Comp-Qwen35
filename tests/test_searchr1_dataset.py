@@ -45,6 +45,11 @@ def test_searchr1_dataset_regions_and_labels(tokenizer, tmp_path):
     ds = SearchR1SFTDataset(str(data), tokenizer)
     assert len(ds) == 1
     s = ds[0]
+    assert s["question"] == "Answer the question. Question: Who founded Google?"
+    original_batch = SearchR1Collator(tokenizer)([s])
+    assert "question_input_ids" not in original_batch
+    question_batch = SearchR1Collator(tokenizer, question_memory_v1=True)([s])
+    assert tokenizer.decode(question_batch["question_input_ids"][0]) == s["question"]
 
     # 至少一个 <information> 压缩区
     assert len(s["regions"]) >= 1

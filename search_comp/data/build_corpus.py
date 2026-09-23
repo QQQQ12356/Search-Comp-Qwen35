@@ -36,7 +36,7 @@ def main() -> None:
 
     datasets = []
     for split in args.splits.split(","):
-        hp = load_dataset("hotpot_qa", "distractor", split=split)
+        hp = load_dataset("hotpotqa/hotpot_qa", "distractor", split=split)
         if args.max_per_split:
             hp = hp.shuffle(seed=args.seed).select(
                 range(min(len(hp), args.max_per_split))

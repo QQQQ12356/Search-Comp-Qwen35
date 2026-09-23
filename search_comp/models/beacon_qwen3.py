@@ -34,6 +34,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
 )
 
 from .beacon_config import BeaconConfig
+from .beacon_question_memory import QuestionMemoryMixin
 from .modeling_utils import beacon_intersect_order, cat_tensor, slice_tensor
 
 
@@ -93,6 +94,12 @@ class BeaconLinearStateWriter(nn.Module):
 # ======================================================================
 # Beacon Attention（full_attention 层）
 # ======================================================================
+class QuestionBeaconLinearStateWriter(QuestionMemoryMixin, BeaconLinearStateWriter):
+    def __init__(self, config, rank):
+        super().__init__(config, rank)
+        self.init_question_memory(config.hidden_size, rank)
+
+
 class BeaconQwen3Attention(Qwen3_5Attention):
     """带 beacon 投影切换的 Qwen3.5 注意力（仅 full_attention 层使用）。
 
@@ -293,6 +300,9 @@ class _Qwen3BeaconMemory:
         self._valid_num = None
         self._store = None
         self._step_beacon_indices = None
+        self._question = None
+        self._question_input_ids = None
+        self._readout_losses = []
 
     @property
     def finish(self) -> bool:
@@ -465,7 +475,8 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
             if layer_type == "full_attention":
                 layer.self_attn = BeaconQwen3Attention(config, idx)
             elif layer_type == "linear_attention":
-                self.model.beacon_linear_writers[str(idx)] = BeaconLinearStateWriter(
+                writer_type = QuestionBeaconLinearStateWriter if self.beacon_config.beacon_question_memory_v1 else BeaconLinearStateWriter
+                self.model.beacon_linear_writers[str(idx)] = writer_type(
                     config,
                     self.beacon_config.beacon_linear_writer_rank,
                 )
@@ -485,6 +496,8 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
             with torch.no_grad():
                 writer.up.bias.zero_()
                 writer.up.bias[-2 * writer.num_heads:-writer.num_heads].fill_(4.0)
+                if isinstance(writer, QuestionBeaconLinearStateWriter):
+                    writer.question_up.weight.zero_()
         for idx, layer in enumerate(self.model.layers):
             if getattr(cfg, "layer_types", [None] * cfg.num_hidden_layers)[idx] != "full_attention":
                 continue
@@ -500,6 +513,8 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
                         b.bias.data.copy_(o.bias.data)
 
     def set_beacon_config(self, beacon_config: BeaconConfig):
+        if beacon_config.beacon_question_memory_v1 != self.beacon_config.beacon_question_memory_v1:
+            raise ValueError("beacon_question_memory_v1 改变模型结构，必须在构造模型前配置")
         for writer in self.model.beacon_linear_writers.values():
             if writer.down.out_features != beacon_config.beacon_linear_writer_rank:
                 raise ValueError(
@@ -513,7 +528,7 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
     # ------------------------------------------------------------------
     def forward(self, input_ids=None, attention_mask=None, labels=None,
                 compress_regions=None, compress_start=None, compress_end=None,
-                regions=None, **kwargs):
+                regions=None, question_input_ids=None, **kwargs):
         if not self.beacon_config.enable_beacon:
             return super().forward(input_ids=input_ids, attention_mask=attention_mask, labels=labels, **kwargs)
         if compress_regions is None and compress_start is not None and compress_end is not None:
@@ -534,9 +549,9 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         )
         if use_cpu_offload:
             with torch.autograd.graph.save_on_cpu(pin_memory=input_ids.is_cuda):
-                loss, logits = self._beacon_forward(input_ids, labels, compress_regions)
+                loss, logits = self._beacon_forward(input_ids, labels, compress_regions, question_input_ids)
         else:
-            loss, logits = self._beacon_forward(input_ids, labels, compress_regions)
+            loss, logits = self._beacon_forward(input_ids, labels, compress_regions, question_input_ids)
         # 返回 ModelOutput，兼容 transformers.Trainer（取 outputs["loss"]）
         return CausalLMOutputWithPast(loss=loss, logits=logits)
 
@@ -607,7 +622,15 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
                     beacon_mask = self._mem._step_beacon_indices.bool()
                     beacon_hidden = hidden[:, beacon_mask]
                     writer = self.model.beacon_linear_writers[str(idx)]
-                    self._mem._linear_recurrent[idx] = writer(beacon_hidden, previous_recurrent)
+                    if self.beacon_config.beacon_question_memory_v1:
+                        written = writer(beacon_hidden, previous_recurrent, self._mem._question)
+                        self._mem._linear_recurrent[idx] = written
+                        if self.training and win_labels is not None and self.beacon_config.beacon_readout_distill_weight > 0:
+                            self._mem._readout_losses.append(
+                                writer.readout_loss(written, reader_recurrent, self._mem._question)
+                            )
+                    else:
+                        self._mem._linear_recurrent[idx] = writer(beacon_hidden, previous_recurrent)
                     self._mem._linear_conv.pop(idx, None)
                 else:
                     self._mem._linear_recurrent[idx] = reader_recurrent
@@ -705,8 +728,24 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         output = module.out_proj(output.reshape(batch, length, module.value_dim))
         return output, next_recurrent, next_conv
 
-    def _beacon_forward(self, input_ids, labels, regions):
+    def _prepare_question(self, question_input_ids):
+        if not self.beacon_config.beacon_question_memory_v1:
+            return
+        if self._mem._question is not None:
+            if question_input_ids is not None:
+                question_input_ids = question_input_ids[:, :self.beacon_config.beacon_question_max_tokens]
+                if not torch.equal(question_input_ids.to(self._mem._question_input_ids.device), self._mem._question_input_ids):
+                    raise ValueError("复用缓存时不能切换 question，请使用 reuse_cache=False")
+            return
+        if question_input_ids is None or question_input_ids.ndim != 2 or question_input_ids.shape[0] != 1 or question_input_ids.shape[1] == 0:
+            raise ValueError("question memory v1 首次调用需要非空 question_input_ids (1, length)")
+        question_input_ids = question_input_ids[:, :self.beacon_config.beacon_question_max_tokens]
+        self._mem._question_input_ids = question_input_ids.detach().clone()
+        self._mem._question = self.model.embed_tokens(question_input_ids.to(self.model.embed_tokens.weight.device))
+
+    def _beacon_forward(self, input_ids, labels, regions, question_input_ids=None):
         self._mem = _Qwen3BeaconMemory(self, self.beacon_config)
+        self._prepare_question(question_input_ids)
         self._mem.prepare(input_ids, labels, regions)
 
         last_logits = None
@@ -719,6 +758,9 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         loss = self._mem.output()
         if loss is None:
             loss = self.model.beacon_embed_tokens.weight.sum() * 0.0
+        if self._mem._readout_losses:
+            loss = loss + self.beacon_config.beacon_readout_distill_weight * torch.stack(self._mem._readout_losses).mean()
+            self._mem._readout_losses = []
         return loss, last_logits
 
     # ------------------------------------------------------------------
@@ -752,7 +794,7 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         return self.model.rotary_emb(ref, pos_ids)
 
     def prefill_and_get_cache(self, input_ids, regions, return_last_logits=False,
-                              reuse_cache=False):
+                              reuse_cache=False, question_input_ids=None):
         """把整条上下文（question + 各检索文档块）编码为 beacon K/V。
 
         ``reuse_cache=True`` 时保留已有持久状态，只处理新增的 ``input_ids``；
@@ -771,6 +813,7 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
             self._mem._segments = []
         else:
             self._mem = _Qwen3BeaconMemory(self, self.beacon_config)
+        self._prepare_question(question_input_ids)
         self._mem.prepare(input_ids, None, regions)
 
         last_logits = None
@@ -817,7 +860,7 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
                         compress_start=None, compress_end=None, max_new_tokens=256,
                         do_sample=False, temperature=1.0, top_p=1.0,
                         eos_token_ids=None, stop_texts=None, tokenizer=None,
-                        reuse_cache=False):
+                        reuse_cache=False, question_input_ids=None):
         """Beacon 模式生成：先编码上下文为 beacon K/V，再自回归生成答案。
 
         参数与参考 :meth:`beacon_qwen2.beacon_generate` 一致；``regions`` 指定
@@ -835,16 +878,17 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
             with torch.no_grad():
                 return self._beacon_generate_loop(
                     input_ids, regions, max_new_tokens, do_sample, temperature, top_p,
-                    eos_token_ids, stop_texts, tokenizer, reuse_cache,
+                    eos_token_ids, stop_texts, tokenizer, reuse_cache, question_input_ids,
                 )
         finally:
             self.train(was_training)
 
     def _beacon_generate_loop(self, input_ids, regions, max_new_tokens, do_sample,
                               temperature, top_p, eos_token_ids, stop_texts, tokenizer,
-                              reuse_cache=False):
+                              reuse_cache=False, question_input_ids=None):
         _mem, logits = self.prefill_and_get_cache(
-            input_ids, regions, return_last_logits=True, reuse_cache=reuse_cache
+            input_ids, regions, return_last_logits=True, reuse_cache=reuse_cache,
+            question_input_ids=question_input_ids,
         )
         eos = eos_token_ids if eos_token_ids is not None else [self.config.eos_token_id]
         generated = []

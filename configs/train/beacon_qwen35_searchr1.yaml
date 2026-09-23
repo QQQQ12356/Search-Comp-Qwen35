@@ -58,6 +58,9 @@ gradient_checkpointing: false
 length_diagnostics_samples: 1000
 beacon:
   enable_beacon: true
+  beacon_question_memory_v1: false
+  beacon_question_max_tokens: 128
+  beacon_readout_distill_weight: 0.1
   beacon_window: 512
   beacon_stride: 512
   beacon_ratio: 16

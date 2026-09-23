@@ -11,7 +11,7 @@ from search_comp.models.beacon_config import BeaconConfig
 from search_comp.models.beacon_qwen3 import BeaconQwen3_5ForCausalLM
 
 
-def _tiny_model(beacon_pos="append", layer_types=None):
+def _tiny_model(beacon_pos="append", layer_types=None, question_memory_v1=False):
     if layer_types is None:
         layer_types = ["linear_attention", "full_attention"]
     config = Qwen3_5TextConfig(
@@ -44,6 +44,7 @@ def _tiny_model(beacon_pos="append", layer_types=None):
         beacon_ratio=2,
         beacon_linear_writer_rank=8,
         beacon_pos=beacon_pos,
+        beacon_question_memory_v1=question_memory_v1,
     ).merge_into_config(config)
     with patch.multiple(
         modeling_qwen3_5,

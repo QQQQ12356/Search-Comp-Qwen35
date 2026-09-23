@@ -56,6 +56,11 @@ def run_beacon_agent(model, tokenizer, retriever, question, max_turns=3, topk=3,
     turns = 0
 
     device = next(model.parameters()).device
+    question_kwargs = {}
+    if getattr(getattr(model, "beacon_config", None), "beacon_question_memory_v1", False):
+        question_kwargs["question_input_ids"] = torch.tensor(
+            [tokenizer(question, add_special_tokens=False).input_ids], dtype=torch.long, device=device,
+        )
     for _ in range(max_turns):
         ids = torch.tensor([pending_ids], dtype=torch.long, device=device)
         attn = torch.ones(1, len(pending_ids), dtype=torch.long, device=device)
@@ -64,6 +69,7 @@ def run_beacon_agent(model, tokenizer, retriever, question, max_turns=3, topk=3,
             max_new_tokens=max_new_tokens_per_turn,
             stop_texts=["</search>", "</answer>"], tokenizer=tokenizer,
             reuse_cache=reuse_cache,
+            **question_kwargs,
         )
         gen_tokens = gen_ids[0].tolist()
         gen_text = tokenizer.decode(gen_tokens, skip_special_tokens=False)

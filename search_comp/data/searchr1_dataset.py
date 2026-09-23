@@ -152,6 +152,7 @@ class SearchR1SFTDataset(Dataset):
         labels: List[int] = []
         regions: List[Tuple[int, int]] = []
         n_searches = 0
+        question_parts = []
 
         seen_assistant = False
         for msg_idx, msg in enumerate(msgs):
@@ -189,6 +190,8 @@ class SearchR1SFTDataset(Dataset):
                     raise ValueError(
                         f"assistant 后不支持 role={role!r} 的非检索消息: {sample.get('id', msg_idx)}"
                     )
+                if role == "user":
+                    question_parts.append(content)
                 text = f"<|im_start|>{role}\n{content}<|im_end|>\n"
                 seg_ids = self.tokenizer(text, add_special_tokens=False).input_ids
                 labels.extend([-100] * len(seg_ids))
@@ -198,6 +201,7 @@ class SearchR1SFTDataset(Dataset):
         n_turns = sum(1 for m in msgs if m.get("role") == "assistant")
         return {
             "input_ids": input_ids,
+            "question": "\n".join(question_parts),
             "labels": labels,
             "regions": regions,
             "n_turns": n_turns,
@@ -215,7 +219,9 @@ class SearchR1Collator:
         tokenizer: HuggingFace tokenizer（用于 pad_token_id，其实 bs=1 不会 pad）。
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizer):
+    def __init__(self, tokenizer: PreTrainedTokenizer, question_memory_v1: bool = False):
+        self.tokenizer = tokenizer
+        self.question_memory_v1 = question_memory_v1
         self.pad_token_id = tokenizer.pad_token_id
         if self.pad_token_id is None:
             raise ValueError("tokenizer 缺少 pad_token，请先设置 pad_token")
@@ -241,4 +247,7 @@ class SearchR1Collator:
             "attention_mask": attention_mask,
             "labels": labels,
             "regions": f["regions"],
+            **({"question_input_ids": torch.tensor([
+                self.tokenizer(f["question"], add_special_tokens=False).input_ids
+            ], dtype=torch.long)} if self.question_memory_v1 else {}),
         }
