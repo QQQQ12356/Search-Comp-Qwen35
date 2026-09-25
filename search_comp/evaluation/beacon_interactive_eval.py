@@ -25,6 +25,7 @@ from tqdm import tqdm
 
 from ..data.build_sft_data import truncate_docs_by_tokens
 from ..data.retrieval import BM25Retriever, format_docs_as_reference
+from ..data.searchr1_dataset import align_to_eval_prompt
 from ..data.trajectory import (
     INFO_PREFIX,
     INFO_SUFFIX,
@@ -38,6 +39,46 @@ from ..utils.runtime import append_jsonl
 
 # 模型未闭合 <answer>...</answer> 时的占位答案（按协议视为未作答，而非整段轨迹兜底）
 NO_ANSWER = "[无作答]"
+
+
+def load_questions_from_searchr1_jsonl(
+    jsonl_path: str, max_questions: int | None = None
+) -> List[Dict[str, Any]]:
+    """从 Search-R1 训练 jsonl 读取题目 + 真值，供在线交互评估使用。
+
+    题目取 ``align_to_eval_prompt`` 后首个 user 消息的裸问题；真值取末条 assistant
+    消息 ``<answer>`` 内容。jsonl 无原生 id，用 ``sr-N``（N 为行号）替代。
+
+    Args:
+        jsonl_path: ``*-instruct-sft.jsonl`` 路径。
+        max_questions: 采样上限（None 表示全量）。
+
+    Returns:
+        ``[{id, question, answer}, ...]``。
+    """
+    rows: List[Dict[str, Any]] = []
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for idx, line in enumerate(f):
+            if max_questions is not None and len(rows) >= max_questions:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            msgs = align_to_eval_prompt(obj["messages"])
+            question = next(
+                (m["content"] for m in msgs if m.get("role") == "user"),
+                "",
+            )
+            answer = ""
+            for m in reversed(msgs):
+                if m.get("role") == "assistant" and "<answer>" in m.get("content", ""):
+                    answer = extract_answer(m["content"]) or ""
+                    break
+            rows.append(
+                {"id": f"sr-{idx}", "question": str(question).strip(), "answer": answer}
+            )
+    return rows
 
 
 def run_beacon_agent(model, tokenizer, retriever, question, max_turns=3, topk=3,
@@ -124,6 +165,13 @@ def main() -> None:
     parser.add_argument("--corpus_path", type=str, required=True)
     parser.add_argument("--output_path", type=str, required=True)
     parser.add_argument("--split", type=str, default="validation")
+    parser.add_argument(
+        "--questions_jsonl", type=str, default=None,
+        help=(
+            "从 Search-R1 jsonl 读取题目+真值（NQ+HotpotQA 训练数据），替代 HF "
+            "--split；命中时忽略 --dataset_name/--dataset_config/--split"
+        ),
+    )
     parser.add_argument("--dataset_name", type=str, default="hotpot_qa")
     parser.add_argument("--dataset_config", type=str, default="distractor")
     parser.add_argument("--max_questions", type=int, default=100)
@@ -148,11 +196,17 @@ def main() -> None:
     model.eval()
 
     retriever = BM25Retriever(args.corpus_path)
-    from datasets import load_dataset
+    if args.questions_jsonl:
+        hp = load_questions_from_searchr1_jsonl(
+            args.questions_jsonl, max_questions=args.max_questions
+        )
+        print(f"[beacon-eval] 题目源: Search-R1 jsonl，共 {len(hp)} 题", flush=True)
+    else:
+        from datasets import load_dataset
 
-    hp = load_dataset(args.dataset_name, args.dataset_config, split=args.split)
-    if args.max_questions:
-        hp = hp.select(range(args.max_questions))
+        hp = load_dataset(args.dataset_name, args.dataset_config, split=args.split)
+        if args.max_questions:
+            hp = hp.select(range(args.max_questions))
 
     completed = {}
     if args.resume and os.path.exists(args.output_path):

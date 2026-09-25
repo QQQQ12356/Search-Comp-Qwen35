@@ -13,28 +13,44 @@ RESULT_PATH=${2:-outputs/results/beacon_qwen3-4B-ratio-${RATIO}_searchr1_interse
 shift $(( $# >= 2 ? 2 : $# ))
 DATASET_NAME=${DATASET_NAME:-hotpotqa/hotpot_qa}
 DATASET_CONFIG=${DATASET_CONFIG:-distractor}
-CORPUS=${CORPUS:-outputs/data/hotpotqa_corpus.jsonl}
+SPLIT=${SPLIT:-validation}
+QUESTIONS_JSONL=${QUESTIONS_JSONL:-outputs/data/searchr1/qwen3-4b-instruct-sft.jsonl}
 CORPUS_PER_SPLIT=${CORPUS_PER_SPLIT:-7405}
 MAX_TURNS=${MAX_TURNS:-3}
 TOP_K=${TOP_K:-3}
 
+# jsonl 模式（对训练 Search-R1 轨迹做在线检索评估）：
+# 题目从 jsonl 取（NQ+HotpotQA），语料也直接从 jsonl 的 <information> 抽文档（含 NQ）。
+# 需先按模式定 CORPUS 默认值，避免被下方非 jsonl 的默认值抢先占用。
+CORPUS=${CORPUS:-}
+if [ -n "$QUESTIONS_JSONL" ]; then
+  CORPUS=${CORPUS:-outputs/data/searchr1_corpus.jsonl}
+else
+  CORPUS=${CORPUS:-outputs/data/hotpotqa_corpus.jsonl}
+fi
 
 mkdir -p outputs/data outputs/results
 
 echo "[beacon-eval] 语料库（不存在则构建）: $CORPUS"
 if [ ! -f "$CORPUS" ]; then
-  "$PYTHON_BIN" -u -m search_comp.data.build_corpus \
-      --output_path "$CORPUS" --splits validation --max_per_split "$CORPUS_PER_SPLIT"
+  if [ -n "$QUESTIONS_JSONL" ]; then
+    "$PYTHON_BIN" -u -m search_comp.data.build_corpus_searchr1 \
+        --jsonl_path "$QUESTIONS_JSONL" --output_path "$CORPUS"
+  else
+    "$PYTHON_BIN" -u -m search_comp.data.build_corpus \
+        --output_path "$CORPUS" --splits validation --max_per_split "$CORPUS_PER_SPLIT"
+  fi
 fi
 echo "[beacon-eval] BM25 索引 + 交互式 Agent 评估（Beacon 压缩生效）"
 
 EXTRA_ARGS=("$@")
 if [[ ${RESUME:-0} == 1 ]]; then EXTRA_ARGS+=(--resume); fi
+if [ -n "$QUESTIONS_JSONL" ]; then EXTRA_ARGS+=(--questions_jsonl "$QUESTIONS_JSONL"); fi
 LOG_PATH=${LOG_PATH:-$(new_log_path beacon_eval)}
 run_logged "$LOG_PATH" env CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2} \
   "$PYTHON_BIN" -u -m search_comp.evaluation.beacon_interactive_eval \
   --model_path "$MODEL_PATH" --corpus_path "$CORPUS" --output_path "$RESULT_PATH" \
-  --split validation --dataset_name "$DATASET_NAME" --dataset_config "$DATASET_CONFIG" \
+  --split "$SPLIT" --dataset_name "$DATASET_NAME" --dataset_config "$DATASET_CONFIG" \
   --max_questions "$MAX_QUESTIONS" --max_turns "$MAX_TURNS" --topk "$TOP_K" \
   --max_docs_tokens "${MAX_DOCS_TOKENS:-1024}" "${EXTRA_ARGS[@]}"
 echo "[beacon-eval] 完成 -> $RESULT_PATH"

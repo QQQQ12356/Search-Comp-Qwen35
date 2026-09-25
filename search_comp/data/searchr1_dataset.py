@@ -64,7 +64,7 @@ _ANSWER_PATTERN = re.compile(r"<answer>")
 _INFORMATION_PATTERN = re.compile(r"\s*<information>(.*?)</information>\s*", re.DOTALL)
 
 
-def _align_to_eval_prompt(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def align_to_eval_prompt(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """把 Search-R1 官方提示词对齐到评测的 ``build_search_chat_prompt``。
 
     评测（``search_comp.data.trajectory.build_search_chat_prompt``）的初始上下文是：:
@@ -99,6 +99,10 @@ def _align_to_eval_prompt(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return result
 
 
+#: 向后兼容别名（旧名）。
+_align_to_eval_prompt = align_to_eval_prompt
+
+
 class SearchR1SFTDataset(Dataset):
     """把 Search-R1 ``messages`` 格式的 SFT 轨迹转成 beacon 训练样本。
 
@@ -124,7 +128,7 @@ class SearchR1SFTDataset(Dataset):
                         if "messages" not in obj:
                             raise ValueError(f"缺少 messages 字段: {line[:80]}")
                         # 训练/评测严格对齐：把协议移进 system、首个 user 只留裸问题。
-                        obj["messages"] = _align_to_eval_prompt(obj["messages"])
+                        obj["messages"] = align_to_eval_prompt(obj["messages"])
                         self.samples.append(obj)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"加载数据 {data_path} 失败: {exc}") from exc
