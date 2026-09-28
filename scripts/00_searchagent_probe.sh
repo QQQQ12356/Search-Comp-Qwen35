@@ -13,8 +13,9 @@ CORPUS_SPLIT=${CORPUS_SPLIT:-train,validation}
 CORPUS_PER_SPLIT=${CORPUS_PER_SPLIT:-200}
 MAX_QUESTIONS=${MAX_QUESTIONS:-10}
 TOP_K=${TOP_K:-3}
-MAX_TURNS=${MAX_TURNS:-3}
+MAX_TURNS=${MAX_TURNS:-4}
 MAX_DOCS_TOKENS=${MAX_DOCS_TOKENS:-1024}
+MAX_NEW_TOKENS_PER_TURN=${MAX_NEW_TOKENS_PER_TURN:-768}
 DO_SAMPLE=${DO_SAMPLE:-0}
 
 mkdir -p outputs/data outputs/results
@@ -41,6 +42,7 @@ run_logged "$LOG_PATH" env CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
     --topk "$TOP_K" \
     --max_turns "$MAX_TURNS" \
     --max_docs_tokens "$MAX_DOCS_TOKENS" \
+    --max_new_tokens_per_turn "$MAX_NEW_TOKENS_PER_TURN" \
     "${SAMPLE_ARGS[@]}"
 
 echo "[probe] 完成 -> $OUTPUT"

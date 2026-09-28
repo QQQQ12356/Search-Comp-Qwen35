@@ -64,6 +64,11 @@ bash scripts/24_beacon_train_searchr1.sh [config]
   - 手动 ChatML 渲染（不触发 Qwen3.5 模板的空 `<think>` 块与思考剥离）。
   - 训练数据 `<thinking>` → 原生 `<think>` 特殊 token。
   - `<information>` 文档块 → **Beacon 压缩区**；损失只算 assistant 生成片段。
+- 文档格式：原始轨迹里的文档是 `[Document N] (ID: ..., Score: ...)` + 带引号标题行的旧
+  格式，而评测检索结果是另一种渲染，两者不一致会让模型看到分布外的文档格式。训练前先
+  用 `bash scripts/29_normalize_docs.sh` 改写成统一格式（`Doc N` + 标题行 + 原样正文，
+  开头连续重复的标题折叠成一个；无 ID/Score；见 `WORKFLOW.md` §2.1），再把
+  `train_data_path` 指向新文件。
 
 ### 1.2 `22_beacon_train.sh`（交互式轨迹数据）
 
@@ -216,8 +221,12 @@ LoRA 相关超参数：
 | `MAX_DOCS_TOKENS` | `1024` | 每轮检索文档最大 token（截断） |
 | `TOP_K` | `3` | 检索 top-k |
 | `MAX_QUESTIONS` | 100/200 | 评估题目数 |
-| `MAX_TURNS` | `3` | 交互式搜索最大轮数 |
+| `MAX_TURNS` | `4` | 交互式搜索最大轮数（训练轨迹最多 3 次 search + 1 次 answer） |
+| `MAX_NEW_TOKENS_PER_TURN` | `768` | 每轮生成上限（覆盖训练 assistant 段 p99≈580；过小会在 `</search>`/`</answer>` 前截断） |
 | `CUDA_VISIBLE_DEVICES` | `0` | GPU 选择 |
+
+> 生成预算的取值依据见 `search_comp/evaluation/budget.py` 与 `WORKFLOW.md` §7；
+> 三条评测路径（beacon / plain / native）共用这两个常量。
 
 ---
 

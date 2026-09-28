@@ -21,60 +21,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable
 
-#: 文档头：``[Document N] (ID: <数值>, Score: <浮点>)``。
-_DOC_HEADER = re.compile(r"\[Document\s+\d+\]\s*\(ID:\s*([^,)]+)\s*,\s*Score:\s*([\d.eE+-]+)\)")
+# 文档解析与渲染统一由 trajectory 提供（训练数据与评测共用同一格式），
+# 这里重新导出 parse_document_blocks 以保持既有调用方与测试的导入路径不变。
+from .trajectory import parse_document_blocks
 
-#: 文档头作为分隔符（下一个文档头或块结束）。
-_DOC_SPLIT = re.compile(r"(?=\[Document\s+\d+\]\s*\(ID:)")
-
-#: 剥离块外层 ``<information>`` / ``</information>`` 标签。
-_INFO_PREFIX_RE = re.compile(r"^\s*<information>\s*", re.DOTALL)
-_INFO_SUFFIX_RE = re.compile(r"\s*</information>\s*$", re.DOTALL)
-
-
-def parse_document_blocks(info_content: str) -> List[Dict[str, str]]:
-    """把一个 ``<information>`` 块内容解析为文档字典列表。
-
-    Args:
-        info_content: ``<information>... </information>`` 的完整内容（含/不含外层标签皆可）。
-
-    Returns:
-        ``[{id, title, text}, ...]``；无文档时返回空列表。
-    """
-    content = _INFO_PREFIX_RE.sub("", info_content or "")
-    content = _INFO_SUFFIX_RE.sub("", content)
-    if not content.strip():
-        return []
-
-    docs: List[Dict[str, str]] = []
-    for part in _DOC_SPLIT.split(content):
-        part = part.strip()
-        if not part:
-            continue
-        header = _DOC_HEADER.match(part)
-        if header is None:
-            continue
-        body = part[header.end():].strip()
-        lines = [ln for ln in body.split("\n") if ln.strip()]
-        if not lines:
-            continue
-        title = lines[0].strip().strip('"').strip()
-        body = "\n".join(lines[1:]).strip()
-        text = f"{title}\n{body}"
-        doc_id = header.group(1).strip()
-        if not doc_id:
-            doc_id = f"{title}|||{body}"
-        docs.append(
-            {
-                "id": doc_id,
-                "title": title,
-                "text": text,
-            }
-        )
-    return docs
+__all__ = ["parse_document_blocks", "build_corpus_from_searchr1_jsonl", "main"]
 
 
 def _iter_docs_from_jsonl(jsonl_path: str) -> Iterable[Dict[str, str]]:

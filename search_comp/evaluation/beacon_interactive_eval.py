@@ -33,6 +33,7 @@ from ..data.trajectory import (
     extract_search_query,
 )
 from ..models.beacon_config import BeaconConfig
+from .budget import MAX_NEW_TOKENS_PER_TURN, MAX_TURNS
 from .em_f1 import extract_answer
 from .statistics import ProgressCheckpointer, summarize_results
 from ..utils.runtime import append_jsonl
@@ -81,8 +82,9 @@ def load_questions_from_searchr1_jsonl(
     return rows
 
 
-def run_beacon_agent(model, tokenizer, retriever, question, max_turns=3, topk=3,
-                     max_docs_tokens=1024, max_new_tokens_per_turn=256) -> Dict[str, Any]:
+def run_beacon_agent(model, tokenizer, retriever, question, max_turns=MAX_TURNS, topk=3,
+                     max_docs_tokens=1024,
+                     max_new_tokens_per_turn=MAX_NEW_TOKENS_PER_TURN) -> Dict[str, Any]:
     question = str(question).strip()
     if not question.endswith("?"):
         question += "?"
@@ -175,10 +177,19 @@ def main() -> None:
     parser.add_argument("--dataset_name", type=str, default="hotpot_qa")
     parser.add_argument("--dataset_config", type=str, default="distractor")
     parser.add_argument("--max_questions", type=int, default=100)
-    parser.add_argument("--max_turns", type=int, default=3)
+    parser.add_argument(
+        "--max_turns", type=int, default=MAX_TURNS,
+        help=f"最大轮数（默认 {MAX_TURNS}：训练轨迹最多 3 次 search + 1 次 answer）",
+    )
     parser.add_argument("--topk", type=int, default=3)
     parser.add_argument("--max_docs_tokens", type=int, default=1024)
-    parser.add_argument("--max_new_tokens_per_turn", type=int, default=256)
+    parser.add_argument(
+        "--max_new_tokens_per_turn", type=int, default=MAX_NEW_TOKENS_PER_TURN,
+        help=(
+            f"每轮生成上限（默认 {MAX_NEW_TOKENS_PER_TURN}：覆盖训练分布 p99≈580）；"
+            "过小会让模型在吐出 </search>/</answer> 前被截断"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--resume", action="store_true",

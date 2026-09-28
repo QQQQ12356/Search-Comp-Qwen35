@@ -31,6 +31,7 @@ from ..data.trajectory import (
     extract_search_query,
 )
 from ..models.model_loader import load_model, load_tokenizer
+from .budget import MAX_NEW_TOKENS_PER_TURN, MAX_TURNS
 from .em_f1 import extract_answer
 
 
@@ -39,10 +40,10 @@ def run_interactive_agent(
     tokenizer: PreTrainedTokenizer,
     retriever: BM25Retriever,
     question: str,
-    max_turns: int = 3,
+    max_turns: int = MAX_TURNS,
     topk: int = 3,
     max_docs_tokens: int = 1024,
-    max_new_tokens_per_turn: int = 256,
+    max_new_tokens_per_turn: int = MAX_NEW_TOKENS_PER_TURN,
     device: torch.device = torch.device("cuda"),
 ) -> Dict[str, Any]:
     """运行单个问题的交互式搜索。
@@ -135,9 +136,10 @@ if __name__ == "__main__":
     parser.add_argument("--output_path", type=str, required=True)
     parser.add_argument("--split", type=str, default="validation")
     parser.add_argument("--max_questions", type=int, default=None)
-    parser.add_argument("--max_turns", type=int, default=3)
+    parser.add_argument("--max_turns", type=int, default=MAX_TURNS)
     parser.add_argument("--topk", type=int, default=3)
     parser.add_argument("--max_docs_tokens", type=int, default=1024)
+    parser.add_argument("--max_new_tokens_per_turn", type=int, default=MAX_NEW_TOKENS_PER_TURN)
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
@@ -160,6 +162,7 @@ if __name__ == "__main__":
             max_turns=args.max_turns,
             topk=args.topk,
             max_docs_tokens=args.max_docs_tokens,
+            max_new_tokens_per_turn=args.max_new_tokens_per_turn,
             device=device,
         )
         r["id"] = str(ex["id"])

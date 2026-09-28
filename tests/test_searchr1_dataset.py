@@ -88,3 +88,41 @@ def test_searchr1_dataset_never_truncates_complete_trajectory(tokenizer, tmp_pat
 def test_collator_bs1_only(tokenizer):
     with pytest.raises(ValueError):
         SearchR1Collator(tokenizer)([{}, {}])
+
+
+def test_dataset_warns_on_legacy_document_format(tokenizer, tmp_path, capsys):
+    """旧格式文档块要显式告警，避免静默训练出与评测不一致的格式。"""
+    from search_comp.data.searchr1_dataset import SearchR1SFTDataset
+
+    legacy = {
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Question: q?"},
+            {"role": "assistant", "content": "<answer>a</answer>"},
+            {
+                "role": "user",
+                "content": '<information>[Document 1] (ID: 1, Score: 0.5)\n"T"\nT body.\n</information>',
+            },
+        ]
+    }
+    unified = {
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Question: q?"},
+            {"role": "assistant", "content": "<answer>a</answer>"},
+            {"role": "user", "content": "<information>Doc 1 T\nT body.</information>"},
+        ]
+    }
+
+    def _write(name, rows):
+        path = tmp_path / name
+        with open(path, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return path
+
+    SearchR1SFTDataset(str(_write("legacy.jsonl", [legacy])), tokenizer)
+    assert "旧格式文档块" in capsys.readouterr().out
+
+    SearchR1SFTDataset(str(_write("unified.jsonl", [unified])), tokenizer)
+    assert "旧格式文档块" not in capsys.readouterr().out

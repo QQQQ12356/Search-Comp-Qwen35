@@ -26,6 +26,7 @@ from tqdm import tqdm
 from ..data.retrieval import BM25Retriever
 from ..milestones.searchagent_probe import run_searchagent_probe
 from ..models.plain_qwen3 import load_sft_model, load_sft_tokenizer
+from .budget import MAX_NEW_TOKENS_PER_TURN, MAX_TURNS
 from .statistics import ProgressCheckpointer, summarize_results
 from ..utils.runtime import append_jsonl
 
@@ -40,8 +41,18 @@ def main() -> None:
     parser.add_argument("--dataset_config", type=str, default="distractor")
     parser.add_argument("--max_questions", type=int, default=200)
     parser.add_argument("--topk", type=int, default=3)
-    parser.add_argument("--max_turns", type=int, default=3)
+    parser.add_argument(
+        "--max_turns", type=int, default=MAX_TURNS,
+        help=f"最大轮数（默认 {MAX_TURNS}：训练轨迹最多 3 次 search + 1 次 answer）",
+    )
     parser.add_argument("--max_docs_tokens", type=int, default=1024)
+    parser.add_argument(
+        "--max_new_tokens_per_turn", type=int, default=MAX_NEW_TOKENS_PER_TURN,
+        help=(
+            f"每轮生成上限（默认 {MAX_NEW_TOKENS_PER_TURN}：覆盖训练分布 p99≈580）；"
+            "过小会让模型在吐出 </search>/</answer> 前被截断"
+        ),
+    )
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -91,6 +102,7 @@ def main() -> None:
             model, tokenizer, retriever, str(ex["question"]),
             max_turns=args.max_turns, topk=args.topk,
             max_docs_tokens=args.max_docs_tokens,
+            max_new_tokens_per_turn=args.max_new_tokens_per_turn,
             do_sample=args.do_sample, temperature=args.temperature,
             verbosity=0,
         )

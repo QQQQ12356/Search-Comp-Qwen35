@@ -45,7 +45,13 @@ import torch
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer
 
-from .trajectory import INFO_PREFIX, INFO_SUFFIX, SEARCH_INSTRUCTION, SYSTEM_PROMPT
+from .trajectory import (
+    INFORMATION_PATTERN,
+    INFO_PREFIX,
+    INFO_SUFFIX,
+    SEARCH_INSTRUCTION,
+    SYSTEM_PROMPT,
+)
 
 #: 训练数据不在仓库内时的获取提示（拼进报错信息，方便新用户自助解决）。
 SEARCH_R1_DATA_HINT = (
@@ -61,7 +67,7 @@ SEARCH_R1_DATA_HINT = (
 _INFO_MARKER = "<information>"
 _SEARCH_PATTERN = re.compile(r"<search>")
 _ANSWER_PATTERN = re.compile(r"<answer>")
-_INFORMATION_PATTERN = re.compile(r"\s*<information>(.*?)</information>\s*", re.DOTALL)
+_INFORMATION_PATTERN = INFORMATION_PATTERN  # 与 trajectory 共用同一匹配（向后兼容别名）
 
 
 def align_to_eval_prompt(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -102,6 +108,36 @@ def align_to_eval_prompt(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 #: 向后兼容别名（旧名）。
 _align_to_eval_prompt = align_to_eval_prompt
 
+#: 旧格式文档头（``[Document N] (ID: ..., Score: ...)``）与评测统一格式不一致。
+_LEGACY_DOC_MARKER = re.compile(r"\[Document\s+\d+\]\s*\(ID:")
+
+#: 评测侧渲染与训练数据不一致时的修复提示。
+LEGACY_DOC_FORMAT_HINT = (
+    "检测到旧格式检索文档（[Document N] (ID: ..., Score: ...)）：评测侧的 "
+    "<information> 块现在是统一格式（Doc N + 标题行 + 去重正文，无 ID/Score），"
+    "继续用旧文件训练会让模型看到的文档与评测不一致。请先规范化数据：\n"
+    "  bash scripts/29_normalize_docs.sh\n"
+    "  --set train_data_path=outputs/data/searchr1/qwen3-4b-instruct-sft-normalized.jsonl"
+)
+
+
+def _warn_if_legacy_document_format(
+    samples: List[Dict[str, Any]], data_path: str
+) -> None:
+    """训练数据仍是旧文档格式时打印一次显式告警（不阻断，便于复现历史结果）。"""
+    legacy_blocks = sum(
+        1
+        for sample in samples
+        for msg in sample.get("messages", [])
+        if _LEGACY_DOC_MARKER.search(msg.get("content", "") or "")
+    )
+    if legacy_blocks:
+        print(
+            f"[searchr1] 警告：{data_path} 中有 {legacy_blocks} 个旧格式文档块。\n"
+            f"{LEGACY_DOC_FORMAT_HINT}",
+            flush=True,
+        )
+
 
 class SearchR1SFTDataset(Dataset):
     """把 Search-R1 ``messages`` 格式的 SFT 轨迹转成 beacon 训练样本。
@@ -134,6 +170,7 @@ class SearchR1SFTDataset(Dataset):
             raise RuntimeError(f"加载数据 {data_path} 失败: {exc}") from exc
         if not self.samples:
             raise RuntimeError(f"数据为空: {data_path}")
+        _warn_if_legacy_document_format(self.samples, data_path)
 
     def __len__(self) -> int:
         return len(self.samples)

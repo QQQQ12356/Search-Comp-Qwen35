@@ -31,6 +31,7 @@ from ..data.trajectory import (
     build_search_chat_prompt,
     extract_search_query,
 )
+from ..evaluation.budget import MAX_NEW_TOKENS_PER_TURN, MAX_TURNS
 from .qwen35_native import generate_text, load_chat_model, load_tokenizer
 
 
@@ -40,7 +41,7 @@ def decode_until(
     input_ids: torch.Tensor,
     stop_texts: List[str],
     eos_token_id: int,
-    max_new_tokens: int = 256,
+    max_new_tokens: int = MAX_NEW_TOKENS_PER_TURN,
     do_sample: bool = False,
     temperature: float = 1.0,
     top_p: float = 1.0,
@@ -100,10 +101,10 @@ def run_searchagent_probe(
     tokenizer,
     retriever: BM25Retriever,
     question: str,
-    max_turns: int = 3,
+    max_turns: int = MAX_TURNS,
     topk: int = 3,
     max_docs_tokens: int = 1024,
-    max_new_tokens_per_turn: int = 256,
+    max_new_tokens_per_turn: int = MAX_NEW_TOKENS_PER_TURN,
     do_sample: bool = False,
     temperature: float = 1.0,
     top_p: float = 1.0,
@@ -215,8 +216,9 @@ def main() -> None:
     parser.add_argument("--split", type=str, default="validation")
     parser.add_argument("--max_questions", type=int, default=10)
     parser.add_argument("--topk", type=int, default=3)
-    parser.add_argument("--max_turns", type=int, default=3)
+    parser.add_argument("--max_turns", type=int, default=MAX_TURNS)
     parser.add_argument("--max_docs_tokens", type=int, default=1024)
+    parser.add_argument("--max_new_tokens_per_turn", type=int, default=MAX_NEW_TOKENS_PER_TURN)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -250,6 +252,7 @@ def main() -> None:
             model, tokenizer, retriever, q,
             max_turns=args.max_turns, topk=args.topk,
             max_docs_tokens=args.max_docs_tokens,
+            max_new_tokens_per_turn=args.max_new_tokens_per_turn,
             do_sample=args.do_sample, temperature=args.temperature,
             verbosity=2,
         )

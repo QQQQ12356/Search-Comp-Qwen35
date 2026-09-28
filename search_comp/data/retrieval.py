@@ -16,6 +16,8 @@ from typing import Any, Dict, List
 
 from rank_bm25 import BM25Okapi
 
+from .trajectory import format_document_blocks
+
 _DEFAULT_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -137,18 +139,15 @@ def build_corpus_from_hotpotqa(
 def format_docs_as_reference(retrieved: List[Dict[str, Any]]) -> str:
     """把检索结果格式化为 ``<information>`` 块内的文本。
 
-    格式与 Search-R1 一致：
-    ``Doc 1 (Title: ...) <正文>``。
+    渲染规则见 :func:`search_comp.data.trajectory.format_document_blocks`：每篇文档
+    为 ``Doc <序号> <标题>`` + 正文（正文以标题开头时去重），文档之间空行分隔，
+    不输出 ``(ID: ..., Score: ...)`` / ``(Title: ...)`` 检索元信息。训练数据里的
+    ``<information>`` 块使用同一渲染函数，保证训练与评测逐字一致。
 
     Args:
-        retrieved: ``retrieve()`` 返回的结果列表。
+        retrieved: ``retrieve()`` 返回的结果列表（``{title, text, ...}``）。
 
     Returns:
         格式化后的文档文本（不含 ``<information>`` 标签）。
     """
-    lines = []
-    for idx, doc in enumerate(retrieved, start=1):
-        title = doc.get("title", "")
-        text = doc.get("text", "")
-        lines.append(f"Doc {idx} (Title: {title}) {text}")
-    return "\n".join(lines)
+    return format_document_blocks(retrieved)

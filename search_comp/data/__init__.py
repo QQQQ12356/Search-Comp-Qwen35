@@ -15,13 +15,17 @@ from .trajectory import (
     build_search_chat_prompt,
     build_sequence_ids,
     extract_search_query,
+    format_document_blocks,
     format_information_block,
+    parse_document_blocks,
 )
 
 __all__ = [
     "BM25Retriever",
     "build_corpus_from_hotpotqa",
     "format_docs_as_reference",
+    "format_document_blocks",
+    "parse_document_blocks",
     "BeaconSFTDataset",
     "BeaconDataCollator",
     "InteractiveSFTDataset",

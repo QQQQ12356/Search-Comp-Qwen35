@@ -16,8 +16,11 @@ DATASET_CONFIG=${DATASET_CONFIG:-distractor}
 SPLIT=${SPLIT:-validation}
 QUESTIONS_JSONL=${QUESTIONS_JSONL:-outputs/data/searchr1/qwen3-4b-instruct-sft.jsonl}
 CORPUS_PER_SPLIT=${CORPUS_PER_SPLIT:-7405}
-MAX_TURNS=${MAX_TURNS:-3}
+# 生成预算与 Search-R1 训练轨迹分布对齐（见 search_comp/evaluation/budget.py）：
+# 训练轨迹最多 3 次 search + 1 次 answer，assistant 段 p99≈580 token。
+MAX_TURNS=${MAX_TURNS:-4}
 TOP_K=${TOP_K:-3}
+MAX_NEW_TOKENS_PER_TURN=${MAX_NEW_TOKENS_PER_TURN:-768}
 
 # jsonl 模式（对训练 Search-R1 轨迹做在线检索评估）：
 # 题目从 jsonl 取（NQ+HotpotQA），语料也直接从 jsonl 的 <information> 抽文档（含 NQ）。
@@ -52,5 +55,6 @@ run_logged "$LOG_PATH" env CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2} \
   --model_path "$MODEL_PATH" --corpus_path "$CORPUS" --output_path "$RESULT_PATH" \
   --split "$SPLIT" --dataset_name "$DATASET_NAME" --dataset_config "$DATASET_CONFIG" \
   --max_questions "$MAX_QUESTIONS" --max_turns "$MAX_TURNS" --topk "$TOP_K" \
-  --max_docs_tokens "${MAX_DOCS_TOKENS:-1024}" "${EXTRA_ARGS[@]}"
+  --max_docs_tokens "${MAX_DOCS_TOKENS:-1024}" \
+  --max_new_tokens_per_turn "$MAX_NEW_TOKENS_PER_TURN" "${EXTRA_ARGS[@]}"
 echo "[beacon-eval] 完成 -> $RESULT_PATH"

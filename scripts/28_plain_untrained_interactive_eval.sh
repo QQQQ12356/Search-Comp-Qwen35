@@ -16,9 +16,10 @@ DATASET_CONFIG=${DATASET_CONFIG:-distractor}
 CORPUS=${CORPUS:-outputs/data/hotpotqa_corpus.jsonl}
 CORPUS_PER_SPLIT=${CORPUS_PER_SPLIT:-7405}
 
-MAX_TURNS=${MAX_TURNS:-3}
+MAX_TURNS=${MAX_TURNS:-4}
 TOP_K=${TOP_K:-3}
 MAX_DOCS_TOKENS=${MAX_DOCS_TOKENS:-1024}
+MAX_NEW_TOKENS_PER_TURN=${MAX_NEW_TOKENS_PER_TURN:-768}
 DO_SAMPLE=${DO_SAMPLE:-0}
 
 mkdir -p outputs/data outputs/results
@@ -46,5 +47,6 @@ run_logged "$LOG_PATH" env CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
     --max_questions "$MAX_QUESTIONS" \
     --max_turns "$MAX_TURNS" --topk "$TOP_K" \
     --max_docs_tokens "$MAX_DOCS_TOKENS" \
+    --max_new_tokens_per_turn "$MAX_NEW_TOKENS_PER_TURN" \
     "${SAMPLE_ARGS[@]}" "${EXTRA_ARGS[@]}"
 echo "[plain-eval] 完成 -> $RESULT_PATH"

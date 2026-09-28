@@ -66,6 +66,36 @@ ln -s /path/to/qwen3-4b-instruct-sft.jsonl \
       outputs/data/searchr1/qwen3-4b-instruct-sft.jsonl
 ```
 
+#### 文档格式规范化（训练与评测必须同格式）
+
+`<information>` 块内的检索文档在训练与评测两侧必须渲染成**同一种文本**，否则模型在
+评测时看到的是训练分布外的格式。统一格式为每篇文档 `Doc <序号> <标题>` + 换行 + 正文
+（正文**原样保留**，仅把开头**连续重复**的标题折叠成一个、至少保留一次；数据里约 40%
+的正文以标题开头，其中 17% 是标题连续重复两次，全部剥掉会把 `Anil Kumble ( born 1970)
+...` 切成 `( born 1970) ...` 这种语法破碎的开头），
+文档之间空行分隔，**不再输出** `[Document N] (ID: ..., Score: ...)` 或 `(Title: ...)`
+这类检索元信息。渲染与解析的唯一来源是
+`search_comp.data.trajectory.format_document_blocks` / `parse_document_blocks`，
+训练数据装载与评测渲染都复用它。
+
+原始 Search-R1 轨迹是 `[Document N] (ID: ..., Score: ...)` + 带引号标题行的旧格式，
+训练前先改写（输出到新文件、不覆盖输入、可重复执行）：
+
+```bash
+TOKENIZER=Qwen/Qwen3.5-2B bash scripts/29_normalize_docs.sh
+# -> outputs/data/searchr1/qwen3-4b-instruct-sft-normalized.jsonl
+```
+
+再把训练配置指过去（语料无需重建：评测侧渲染用的是同一函数）：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/24_beacon_train_searchr1.sh \
+  configs/train/beacon_qwen35_searchr1.yaml \
+  --set train_data_path=outputs/data/searchr1/qwen3-4b-instruct-sft-normalized.jsonl
+```
+
+脚本按样本结构自动分派，`messages`（Search-R1）与 `turns[].docs`（交互式）都支持。
+
 ## 3. 先运行测试
 
 ```bash
@@ -245,8 +275,28 @@ MAX_QUESTIONS=200 CUDA_VISIBLE_DEVICES=0 \
 RESUME=1 bash scripts/23_beacon_eval.sh MODEL_PATH RESULT_PATH
 ```
 
-可通过环境变量修改 `MAX_QUESTIONS`、`MAX_TURNS`、`TOP_K`、
-`MAX_DOCS_TOKENS`；额外 Python 参数可直接追加在两个位置参数之后。
+可通过环境变量修改 `MAX_QUESTIONS`、`MAX_TURNS`、`TOP_K`、`MAX_DOCS_TOKENS`、
+`MAX_NEW_TOKENS_PER_TURN`；额外 Python 参数可直接追加在两个位置参数之后。
+
+### 生成预算与训练分布对齐
+
+评测的生成预算必须覆盖训练轨迹的分布，否则模型会在吐出 `</search>` / `</answer>` 之前
+被截断——首轮没有 `</search>` 就直接结束搜索、末轮没有 `</answer>` 会被判为未作答。
+实测训练轨迹（Search-R1 SFT）：
+
+| assistant 段 | p50 | p90 | p99 | max |
+| --- | --- | --- | --- | --- |
+| 首轮（think + search） | 151 | 275 | 488 | 2146 |
+| 末轮（think + answer） | 161 | 277 | 580 | 1284 |
+
+轮数分布为 2 / 3 / 4 条 assistant 消息，即最多 **3 次 search + 1 次 answer**。因此
+`search_comp/evaluation/budget.py` 固定 `MAX_NEW_TOKENS_PER_TURN = 768`（覆盖 p99）、
+`MAX_TURNS = 4`，beacon / plain / native 三条评测路径与 `scripts/00`、`21`、`23`、`28`
+共用这两个常量（上限本身不额外耗时：命中停止文本即停）。若沿用更小的预算（例如
+256 token / 3 轮），约 12%~14% 的题在结构上不可能答对，EM/F1 会被这个参数压住。
+
+评测喂给模型的检索文档使用与训练相同的统一格式（见 §2.1），由
+`format_docs_as_reference` → `format_document_blocks` 渲染。
 
 ## 8. 统计与实验比较
 
