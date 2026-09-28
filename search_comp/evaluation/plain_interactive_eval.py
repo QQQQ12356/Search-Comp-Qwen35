@@ -26,6 +26,8 @@ from tqdm import tqdm
 from ..data.retrieval import BM25Retriever
 from ..milestones.searchagent_probe import run_searchagent_probe
 from ..models.plain_qwen3 import load_sft_model, load_sft_tokenizer
+# jsonl 模式的题目解析与 Beacon 路径共用同一实现（同一份 Search-R1 训练轨迹）。
+from .beacon_interactive_eval import load_questions_from_searchr1_jsonl
 from .budget import MAX_NEW_TOKENS_PER_TURN, MAX_TURNS
 from .statistics import ProgressCheckpointer, summarize_results
 from ..utils.runtime import append_jsonl
@@ -37,6 +39,13 @@ def main() -> None:
     parser.add_argument("--corpus_path", type=str, required=True)
     parser.add_argument("--output_path", type=str, required=True)
     parser.add_argument("--split", type=str, default="validation")
+    parser.add_argument(
+        "--questions_jsonl", type=str, default=None,
+        help=(
+            "从 Search-R1 jsonl 读取题目+真值（NQ+HotpotQA 训练数据），替代 HF "
+            "--split；命中时忽略 --dataset_name/--dataset_config/--split"
+        ),
+    )
     parser.add_argument("--dataset_name", type=str, default="hotpot_qa")
     parser.add_argument("--dataset_config", type=str, default="distractor")
     parser.add_argument("--max_questions", type=int, default=200)
@@ -72,11 +81,17 @@ def main() -> None:
 
     retriever = BM25Retriever(args.corpus_path)
 
-    from datasets import load_dataset
+    if args.questions_jsonl:
+        hp = load_questions_from_searchr1_jsonl(
+            args.questions_jsonl, max_questions=args.max_questions
+        )
+        print(f"[plain-eval] 题目源: Search-R1 jsonl，共 {len(hp)} 题", flush=True)
+    else:
+        from datasets import load_dataset
 
-    hp = load_dataset(args.dataset_name, args.dataset_config, split=args.split)
-    if args.max_questions:
-        hp = hp.select(range(args.max_questions))
+        hp = load_dataset(args.dataset_name, args.dataset_config, split=args.split)
+        if args.max_questions:
+            hp = hp.select(range(args.max_questions))
 
     completed = {}
     if args.resume and os.path.exists(args.output_path):
