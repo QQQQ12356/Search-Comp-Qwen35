@@ -195,9 +195,11 @@ def run_searchagent_probe(
         context_ids[0, len(tokenizer(chat_prefix_text, add_special_tokens=False).input_ids):].tolist(),
         skip_special_tokens=True,
     )
-    from ..evaluation.em_f1 import extract_answer
+    from ..evaluation.em_f1 import answer_or_placeholder
 
-    prediction = extract_answer(assistant_text) or assistant_text.strip()
+    # 与 beacon 评测共用同一兜底：未闭合 <answer> 时统一记 [无作答]，
+    # 而不是拿整段原始输出当预测（口径一致、prediction 字段也可读）。
+    prediction = answer_or_placeholder(assistant_text)
     return {
         "prediction": prediction,
         "turns": turns_taken,

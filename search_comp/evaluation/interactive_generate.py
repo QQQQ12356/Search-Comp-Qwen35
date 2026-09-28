@@ -32,7 +32,7 @@ from ..data.trajectory import (
 )
 from ..models.model_loader import load_model, load_tokenizer
 from .budget import MAX_NEW_TOKENS_PER_TURN, MAX_TURNS
-from .em_f1 import extract_answer
+from .em_f1 import answer_or_placeholder
 
 
 def run_interactive_agent(
@@ -120,7 +120,7 @@ def run_interactive_agent(
         ],
         skip_special_tokens=True,
     )
-    prediction = extract_answer(assistant_text) or assistant_text.strip()
+    prediction = answer_or_placeholder(assistant_text)
     return {
         "prediction": prediction,
         "turns": turns_taken,

@@ -11,11 +11,11 @@ from statistics import mean, median
 from collections import Counter
 from typing import Any, Iterable
 
-from .em_f1 import compute_metrics, extract_answer
+from .em_f1 import NO_ANSWER, compute_metrics, extract_answer
 from ..utils.runtime import write_json
 
 #: 视为「未按格式作答」的占位预测（协议层面模型未闭合 <answer>）
-NO_ANSWER_PLACEHOLDERS = {"", "[无作答]"}
+NO_ANSWER_PLACEHOLDERS = {"", NO_ANSWER}
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:

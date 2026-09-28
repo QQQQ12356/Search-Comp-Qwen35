@@ -1,6 +1,7 @@
 """EM / F1 评估指标（HotpotQA 标准）。
 
 - ``extract_answer``：从模型输出中提取最后一个 ``<answer>...</answer>`` 的内容。
+- ``answer_or_placeholder``：提取答案，未闭合 ``<answer>`` 时返回统一占位符。
 - ``normalize_answer``：标准化（去冠词/标点/小写/压缩空格）。
 - ``compute_em`` / ``compute_f1``：分别计算精确匹配与 token 级 F1。
 - ``compute_metrics``：对一批预测计算平均 EM/F1。
@@ -18,6 +19,11 @@ from typing import Dict, List, Optional, Tuple
 #: 提取 <answer> 标签内的内容
 _ANSWER_PATTERN = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 
+#: 模型未闭合 ``<answer>...</answer>`` 时的占位预测（按协议视为未作答）。
+#: 所有评测路径共用：不能用整段原始输出兜底，否则 prediction 字段既不可读，
+#: 还可能让原文里的字符串意外命中金标准。
+NO_ANSWER = "[无作答]"
+
 
 def extract_answer(solution_str: str) -> Optional[str]:
     """从模型输出中提取最后一个 ``<answer>...</answer>`` 的内容。
@@ -32,6 +38,21 @@ def extract_answer(solution_str: str) -> Optional[str]:
     if not matches:
         return None
     return matches[-1].group(1).strip()
+
+
+def answer_or_placeholder(solution_str: str) -> str:
+    """提取 ``<answer>...</answer>``；未闭合时返回 :data:`NO_ANSWER` 占位符。
+
+    所有评测路径（beacon / plain / native）都走这一个函数，保证「未按协议作答」
+    在各路径下的 prediction 字段与格式正确率口径完全一致。
+
+    Args:
+        solution_str: 模型生成的完整输出文本。
+
+    Returns:
+        答案字符串，或 :data:`NO_ANSWER`。
+    """
+    return extract_answer(solution_str) or NO_ANSWER
 
 
 def normalize_answer(s: str) -> str:

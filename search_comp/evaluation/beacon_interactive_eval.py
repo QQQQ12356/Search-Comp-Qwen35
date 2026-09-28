@@ -34,12 +34,9 @@ from ..data.trajectory import (
 )
 from ..models.beacon_config import BeaconConfig
 from .budget import MAX_NEW_TOKENS_PER_TURN, MAX_TURNS
-from .em_f1 import extract_answer
+from .em_f1 import answer_or_placeholder, extract_answer
 from .statistics import ProgressCheckpointer, summarize_results
 from ..utils.runtime import append_jsonl
-
-# 模型未闭合 <answer>...</answer> 时的占位答案（按协议视为未作答，而非整段轨迹兜底）
-NO_ANSWER = "[无作答]"
 
 
 def load_questions_from_searchr1_jsonl(
@@ -144,7 +141,7 @@ def run_beacon_agent(model, tokenizer, retriever, question, max_turns=MAX_TURNS,
         context_ids[len(tokenizer(chat_prefix, add_special_tokens=False).input_ids):],
         skip_special_tokens=True,
     )
-    prediction = extract_answer(assistant_text) or NO_ANSWER
+    prediction = answer_or_placeholder(assistant_text)
     information_tokens = sum(end - start for start, end in regions)
     ratio = model.beacon_config.beacon_ratio
     beacon_tokens = sum(max(1, (end - start + ratio - 1) // ratio) for start, end in regions)
