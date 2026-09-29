@@ -36,6 +36,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
 from .beacon_config import BeaconConfig
 from .beacon_question_memory import QuestionMemoryMixin
 from .modeling_utils import beacon_intersect_order, cat_tensor, slice_tensor
+from ..loss_segments import SEGMENT_IGNORE, segment_ids_to_weights
 
 
 class BeaconLinearStateWriter(nn.Module):
@@ -303,13 +304,16 @@ class _Qwen3BeaconMemory:
         self._question = None
         self._question_input_ids = None
         self._readout_losses = []
+        # 分段损失：全序列逐位置权重，以及当前窗口的切片
+        self._seq_weights: Optional[torch.Tensor] = None
+        self._step_weights: Optional[torch.Tensor] = None
 
     @property
     def finish(self) -> bool:
         return self._pos >= self._seq_len
 
     # ------------------------------------------------------------------
-    def prepare(self, input_ids, labels, regions):
+    def prepare(self, input_ids, labels, regions, loss_segment_ids=None):
         self._seq_len = input_ids.shape[1]
         self._device = input_ids.device
         self._input_ids = input_ids
@@ -317,6 +321,17 @@ class _Qwen3BeaconMemory:
         if labels is not None:
             labels = torch.cat([labels[:, 1:], labels.new_full((labels.shape[0], 1), -100)], dim=1)
         self._labels = labels
+        # 片段类别描述的是「被监督的那个 token」，因此与 labels 同步移位，
+        # 再按配置查表转成逐位置权重（SEGMENT_IGNORE 位置权重 0）。
+        if loss_segment_ids is not None:
+            loss_segment_ids = torch.cat(
+                [
+                    loss_segment_ids[:, 1:],
+                    loss_segment_ids.new_full((loss_segment_ids.shape[0], 1), SEGMENT_IGNORE),
+                ],
+                dim=1,
+            )
+        self._seq_weights = segment_ids_to_weights(loss_segment_ids, self.beacon.loss_segments)
 
         regions = [(int(s), int(e)) for s, e in regions]
         cursor = 0
@@ -355,6 +370,7 @@ class _Qwen3BeaconMemory:
 
         input_ids = self._input_ids[:, start:end]
         labels = self._labels[:, start:end] if self._labels is not None else None
+        weights = self._seq_weights[:, start:end] if self._seq_weights is not None else None
 
         if beacon_size > 0:
             input_ids = torch.cat(
@@ -362,6 +378,11 @@ class _Qwen3BeaconMemory:
             )
             if labels is not None:
                 labels = torch.cat([labels, labels.new_full((labels.shape[0], beacon_size), -100)], dim=1)
+            if weights is not None:
+                # beacon 位置不参与损失，权重置 0（与 labels=-100 对齐）
+                weights = torch.cat(
+                    [weights, weights.new_zeros((weights.shape[0], beacon_size))], dim=1
+                )
 
         cur_len = input_ids.shape[1]
         if beacon_size > 0:
@@ -378,6 +399,9 @@ class _Qwen3BeaconMemory:
             self._step_beacon_indices = self._step_beacon_indices[order]
             if labels is not None:
                 labels = labels[:, order]
+            if weights is not None:
+                weights = weights[:, order]
+        self._step_weights = weights
 
         # past：full-attn 层 4 元组
         mem_size = 0
@@ -528,7 +552,7 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
     # ------------------------------------------------------------------
     def forward(self, input_ids=None, attention_mask=None, labels=None,
                 compress_regions=None, compress_start=None, compress_end=None,
-                regions=None, question_input_ids=None, **kwargs):
+                regions=None, question_input_ids=None, loss_segment_ids=None, **kwargs):
         if not self.beacon_config.enable_beacon:
             return super().forward(input_ids=input_ids, attention_mask=attention_mask, labels=labels, **kwargs)
         if compress_regions is None and compress_start is not None and compress_end is not None:
@@ -549,9 +573,13 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         )
         if use_cpu_offload:
             with torch.autograd.graph.save_on_cpu(pin_memory=input_ids.is_cuda):
-                loss, logits = self._beacon_forward(input_ids, labels, compress_regions, question_input_ids)
+                loss, logits = self._beacon_forward(
+                    input_ids, labels, compress_regions, question_input_ids, loss_segment_ids
+                )
         else:
-            loss, logits = self._beacon_forward(input_ids, labels, compress_regions, question_input_ids)
+            loss, logits = self._beacon_forward(
+                input_ids, labels, compress_regions, question_input_ids, loss_segment_ids
+            )
         # 返回 ModelOutput，兼容 transformers.Trainer（取 outputs["loss"]）
         return CausalLMOutputWithPast(loss=loss, logits=logits)
 
@@ -642,43 +670,75 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         if win_labels is not None:
             valid_num = (win_labels != -100).sum(-1)
             if valid_num.sum().item() > 0:
-                batch_loss = self._sparse_window_loss(hidden, win_labels, valid_num)
-                self._mem.update_loss(batch_loss, valid_num)
+                batch_loss, weight_sum = self._sparse_window_loss(
+                    hidden, win_labels, valid_num, self._mem._step_weights
+                )
+                self._mem.update_loss(batch_loss, weight_sum)
         elif last_logits_only:
             logits = self.lm_head(hidden[:, -1:, :]).float()
         else:
             logits = self.lm_head(hidden).float()
         return new_past, logits
 
-    def _sparse_window_loss(self, hidden, labels, valid_num):
-        """只为非 ``-100`` 位置计算分块词表交叉熵。"""
+    def _sparse_window_loss(self, hidden, labels, valid_num, weights=None):
+        """只为非 ``-100`` 位置计算分块词表交叉熵（可选按片段类别加权）。
+
+        Args:
+            hidden: ``(bsz, cur, hidden)`` 当前窗口隐状态。
+            labels: ``(bsz, cur)`` 已移位的目标 token，-100 表示不监督。
+            valid_num: ``(bsz,)`` 每个样本的监督 token 数（无权重时的归一化分母）。
+            weights: ``(bsz, cur)`` 逐位置权重，或 None（等权，与历史行为一致）。
+
+        Returns:
+            ``(batch_loss, weight_sum)``：每个样本的加权平均损失，以及对应的权重和
+            （作为跨窗口聚合的归一化分母）。
+        """
         chunk_size = self.beacon_config.beacon_loss_chunk_size
         checkpoint_loss = self.beacon_config.beacon_checkpoint_loss and self.training
         batch_losses = []
+        weight_sums = []
         for batch_idx in range(hidden.shape[0]):
-            selected_hidden = hidden[batch_idx, labels[batch_idx] != -100]
-            selected_labels = labels[batch_idx, labels[batch_idx] != -100]
+            selected_mask = labels[batch_idx] != -100
+            selected_hidden = hidden[batch_idx, selected_mask]
+            selected_labels = labels[batch_idx, selected_mask]
+            selected_weights = weights[batch_idx, selected_mask] if weights is not None else None
+            # 分母 = 权重和（等权时退化为监督 token 数），保证加权不改变损失量纲
+            denominator = (
+                selected_weights.sum()
+                if selected_weights is not None
+                else valid_num[batch_idx].to(torch.float32)
+            )
             loss_sum = hidden.new_zeros((), dtype=torch.float32)
             for start in range(0, selected_hidden.shape[0], chunk_size):
                 chunk_hidden = selected_hidden[start:start + chunk_size]
                 chunk_labels = selected_labels[start:start + chunk_size]
+                chunk_weights = (
+                    selected_weights[start:start + chunk_size]
+                    if selected_weights is not None
+                    else None
+                )
 
-                def loss_function(current_hidden, current_labels):
+                def loss_function(current_hidden, current_labels, current_weights):
                     chunk_logits = self.lm_head(current_hidden).float()
-                    return F.cross_entropy(chunk_logits, current_labels, reduction="sum")
+                    token_loss = F.cross_entropy(chunk_logits, current_labels, reduction="none")
+                    if current_weights is None:
+                        return token_loss.sum()
+                    return (token_loss * current_weights).sum()
 
                 if checkpoint_loss and chunk_hidden.requires_grad:
                     chunk_loss = torch.utils.checkpoint.checkpoint(
                         loss_function,
                         chunk_hidden,
                         chunk_labels,
+                        chunk_weights,
                         use_reentrant=False,
                     )
                 else:
-                    chunk_loss = loss_function(chunk_hidden, chunk_labels)
+                    chunk_loss = loss_function(chunk_hidden, chunk_labels, chunk_weights)
                 loss_sum = loss_sum + chunk_loss
-            batch_losses.append(loss_sum / valid_num[batch_idx].clamp(min=1))
-        return torch.stack(batch_losses)
+            batch_losses.append(loss_sum / denominator.clamp(min=1e-6))
+            weight_sums.append(denominator)
+        return torch.stack(batch_losses), torch.stack(weight_sums)
 
     @staticmethod
     def _linear_attention_forward(module, hidden, previous_recurrent, previous_conv):
@@ -743,10 +803,11 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         self._mem._question_input_ids = question_input_ids.detach().clone()
         self._mem._question = self.model.embed_tokens(question_input_ids.to(self.model.embed_tokens.weight.device))
 
-    def _beacon_forward(self, input_ids, labels, regions, question_input_ids=None):
+    def _beacon_forward(self, input_ids, labels, regions, question_input_ids=None,
+                        loss_segment_ids=None):
         self._mem = _Qwen3BeaconMemory(self, self.beacon_config)
         self._prepare_question(question_input_ids)
-        self._mem.prepare(input_ids, labels, regions)
+        self._mem.prepare(input_ids, labels, regions, loss_segment_ids)
 
         last_logits = None
         while not self._mem.finish:

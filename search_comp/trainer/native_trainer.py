@@ -80,7 +80,7 @@ class NativeSearchSFTDataset(Dataset):
         sample = self.samples[idx]
         q = str(sample["question"])
         chat_input = build_search_chat_prompt(q, add_generation_prompt=True)
-        ids, _regions, gen_spans = build_sequence_ids(
+        ids, _regions, gen_spans, _segments = build_sequence_ids(
             self.tokenizer, chat_input, sample, max_length=self.max_length
         )
         labels = build_loss_labels(len(ids), ids, gen_spans)

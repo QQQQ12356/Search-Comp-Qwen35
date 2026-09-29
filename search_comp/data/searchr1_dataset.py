@@ -39,7 +39,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch.utils.data import Dataset
@@ -52,6 +52,7 @@ from .trajectory import (
     SEARCH_INSTRUCTION,
     SYSTEM_PROMPT,
 )
+from ..loss_segments import SEGMENT_IGNORE, LossSegmentConfig, classify_assistant_text
 
 #: 训练数据不在仓库内时的获取提示（拼进报错信息，方便新用户自助解决）。
 SEARCH_R1_DATA_HINT = (
@@ -145,14 +146,21 @@ class SearchR1SFTDataset(Dataset):
     Args:
         data_path: JSONL 路径，每行 ``{messages: [{role, content}, ...]}``。
         tokenizer: HuggingFace tokenizer（Qwen3.5 系列）。
+        loss_segments: 分段损失配置；为 None 或全默认时不生成 ``loss_segment_ids``，
+            保持与历史行为一致（逐 token 等权）。
     """
 
     def __init__(
-        self, data_path: str, tokenizer: PreTrainedTokenizer
+        self,
+        data_path: str,
+        tokenizer: PreTrainedTokenizer,
+        loss_segments: Optional[LossSegmentConfig] = None,
     ):
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"数据文件不存在: {data_path}\n{SEARCH_R1_DATA_HINT}")
         self.tokenizer = tokenizer
+        # 全默认权重等价于不加权，此时连分类都不做（省一次带 offset 的分词）
+        self.loss_segments = None if (loss_segments is None or loss_segments.is_default) else loss_segments
         self.samples: List[Dict[str, Any]] = []
         try:
             with open(data_path, "r", encoding="utf-8") as f:
@@ -183,6 +191,8 @@ class SearchR1SFTDataset(Dataset):
             - ``input_ids``: 拼接后的 token id 列表。
             - ``labels``: loss 掩码，assistant token 处为自身 id，其余 -100。
             - ``regions``: 各 ``<information>`` 文档块的 token 区间。
+            - ``loss_segment_ids``: 与 ``input_ids`` 等长的片段类别 id；未启用
+              分段损失时为 None。
             - ``n_turns`` / ``n_searches``: 用于统计（交互轮数、搜索次数）。
         """
         msgs = sample["messages"]
@@ -191,6 +201,7 @@ class SearchR1SFTDataset(Dataset):
 
         input_ids: List[int] = []
         labels: List[int] = []
+        segment_ids: List[int] = []
         regions: List[Tuple[int, int]] = []
         n_searches = 0
         question_parts = []
@@ -206,10 +217,12 @@ class SearchR1SFTDataset(Dataset):
                     ).input_ids
                     input_ids.extend(assistant_prefix_ids)
                     labels.extend([-100] * len(assistant_prefix_ids))
+                    segment_ids.extend([SEGMENT_IGNORE] * len(assistant_prefix_ids))
                 seen_assistant = True
                 seg_ids = self.tokenizer(content, add_special_tokens=False).input_ids
                 # 模型输出整体作为 SFT 目标（thinking + search + answer）。
                 labels.extend(seg_ids)
+                segment_ids.extend(self._segment_ids_for(content, seg_ids))
                 n_searches += len(_SEARCH_PATTERN.findall(content))
             elif role == "user" and seen_assistant:
                 info_match = _INFORMATION_PATTERN.fullmatch(content)
@@ -225,6 +238,7 @@ class SearchR1SFTDataset(Dataset):
                 regions.append((start, start + len(docs_ids)))
                 seg_ids = prefix_ids + docs_ids + suffix_ids
                 labels.extend([-100] * len(seg_ids))
+                segment_ids.extend([SEGMENT_IGNORE] * len(seg_ids))
             else:
                 # 初始 system / user prompt 使用 ChatML，与评测初始上下文完全一致。
                 if seen_assistant:
@@ -236,6 +250,7 @@ class SearchR1SFTDataset(Dataset):
                 text = f"<|im_start|>{role}\n{content}<|im_end|>\n"
                 seg_ids = self.tokenizer(text, add_special_tokens=False).input_ids
                 labels.extend([-100] * len(seg_ids))
+                segment_ids.extend([SEGMENT_IGNORE] * len(seg_ids))
 
             input_ids.extend(seg_ids)
 
@@ -245,9 +260,29 @@ class SearchR1SFTDataset(Dataset):
             "question": "\n".join(question_parts),
             "labels": labels,
             "regions": regions,
+            "loss_segment_ids": segment_ids if self.loss_segments is not None else None,
             "n_turns": n_turns,
             "n_searches": n_searches,
         }
+
+    def _segment_ids_for(self, content: str, seg_ids: List[int]) -> List[int]:
+        """把一段 assistant 文本按 think/search/answer 标签与正文分类。
+
+        Args:
+            content: assistant 消息原文。
+            seg_ids: 该消息的 token id 列表（用于对齐长度与兜底）。
+
+        Returns:
+            与 ``seg_ids`` 等长的类别 id 列表；未启用分段损失时为全
+            :data:`SEGMENT_IGNORE`。
+        """
+        if self.loss_segments is None:
+            return [SEGMENT_IGNORE] * len(seg_ids)
+        classified = classify_assistant_text(content, self.tokenizer)
+        if len(classified) != len(seg_ids):
+            # 分词器在带/不带 offset_mapping 时切分不一致，退回等权而不是错位
+            return [SEGMENT_IGNORE] * len(seg_ids)
+        return classified
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         return self._tokenize(self.samples[idx])
@@ -291,4 +326,7 @@ class SearchR1Collator:
             **({"question_input_ids": torch.tensor([
                 self.tokenizer(f["question"], add_special_tokens=False).input_ids
             ], dtype=torch.long)} if self.question_memory_v1 else {}),
+            **({"loss_segment_ids": torch.tensor(
+                [f["loss_segment_ids"]], dtype=torch.long
+            )} if f.get("loss_segment_ids") is not None else {}),
         }

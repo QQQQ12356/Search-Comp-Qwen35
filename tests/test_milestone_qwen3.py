@@ -70,7 +70,7 @@ def _sample():
 def test_sequence_build_regions_and_loss(tokenizer):
     s = _sample()
     chat_input = build_search_chat_prompt(s["question"], add_generation_prompt=True)
-    ids, regions, gen_spans = build_sequence_ids(tokenizer, chat_input, s, max_length=4096)
+    ids, regions, gen_spans, _segments = build_sequence_ids(tokenizer, chat_input, s, max_length=4096)
     assert len(ids) > 0
     # 两个 <information> 文档压缩区
     assert len(regions) == 2

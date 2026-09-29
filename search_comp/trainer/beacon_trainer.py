@@ -201,26 +201,38 @@ def main_train(
         model.print_trainable_parameters()
 
     data_mode = cfg.get("data_mode", "interactive")
+    loss_segments = beacon_cfg.loss_segments
+    if not loss_segments.is_default:
+        print(
+            "[beacon] 分段损失已启用："
+            + ", ".join(
+                f"{name}={getattr(loss_segments, name).effective_weight:g}"
+                for name in loss_segments.enabled_names()
+            ),
+            flush=True,
+        )
     if data_mode == "searchr1":
         from ..data.searchr1_dataset import SearchR1Collator, SearchR1SFTDataset
 
         train_ds = SearchR1SFTDataset(
-            cfg["train_data_path"], tokenizer
+            cfg["train_data_path"], tokenizer, loss_segments=loss_segments
         )
         collator = SearchR1Collator(tokenizer, question_memory_v1=beacon_cfg.beacon_question_memory_v1)
         eval_ds = (
-            SearchR1SFTDataset(cfg["val_data_path"], tokenizer)
+            SearchR1SFTDataset(cfg["val_data_path"], tokenizer, loss_segments=loss_segments)
             if cfg.get("val_data_path") else None
         )
         print(f"[beacon] data_mode=searchr1，{len(train_ds)} 条 Search-R1 SFT 轨迹", flush=True)
     else:
         train_ds = InteractiveSFTDataset(
-            cfg["train_data_path"], tokenizer, max_length=cfg.get("max_length", 8192)
+            cfg["train_data_path"], tokenizer, max_length=cfg.get("max_length", 8192),
+            loss_segments=loss_segments,
         )
         collator = InteractiveCollator(tokenizer, question_memory_v1=beacon_cfg.beacon_question_memory_v1)
         eval_ds = (
             InteractiveSFTDataset(
-                cfg["val_data_path"], tokenizer, max_length=cfg.get("max_length", 8192)
+                cfg["val_data_path"], tokenizer, max_length=cfg.get("max_length", 8192),
+                loss_segments=loss_segments,
             )
             if cfg.get("val_data_path") else None
         )

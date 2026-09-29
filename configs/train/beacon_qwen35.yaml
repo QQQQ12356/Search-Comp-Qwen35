@@ -57,3 +57,16 @@ beacon:
   beacon_checkpoint_loss: true
   beacon_cpu_offload_activations: false
   beacon_cpu_offload_threshold: 0
+  # 分段损失：控制「哪些片段计损失、各占多少权重」。
+  #   L = Σ w_i·CE_i / Σ w_i   （分母是权重和）
+  # 调权重只改变类别之间的份额，不会整体放大损失或有效学习率；
+  # enabled=false 等价于 weight=0（该类既不进分子也不进分母）。
+  # 类别与实测占比见 docs/loss_segments.md。
+  loss_segments:
+    think_tag:      {enabled: true, weight: 1.0}
+    think_content:  {enabled: true, weight: 1.0}
+    search_tag:     {enabled: true, weight: 1.0}
+    search_content: {enabled: true, weight: 1.0}
+    answer_tag:     {enabled: true, weight: 1.0}
+    answer_content: {enabled: true, weight: 1.0}
+    other:          {enabled: true, weight: 1.0}

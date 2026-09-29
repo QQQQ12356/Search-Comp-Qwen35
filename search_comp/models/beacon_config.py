@@ -10,8 +10,10 @@ Activation Beacon (https://arxiv.org/abs/2401.03462)。
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, Optional
+
+from ..loss_segments import LossSegmentConfig, field_default
 
 
 @dataclass
@@ -59,6 +61,9 @@ class BeaconConfig:
     beacon_cpu_offload_activations: bool = False
     #: 启用 CPU offload 时的最小输入长度；0 表示所有样本都启用
     beacon_cpu_offload_threshold: int = 0
+    #: 分段损失：按片段类别（think/search/answer 的标签与正文）控制开关与权重。
+    #: 默认全启用、权重 1.0，此时损失与不加权逐位一致。
+    loss_segments: LossSegmentConfig = field(default_factory=LossSegmentConfig)
 
     def __post_init__(self) -> None:
         """校验参数合法性。"""
@@ -97,6 +102,9 @@ class BeaconConfig:
             valid_params = {"q", "k", "v", "o"}
             for p in self.beacon_param.split():
                 assert p in valid_params, f"beacon_param 含非法投影类型: {p}"
+        # 允许直接传 dict（如从 YAML 构造）时自动转成配置对象
+        if not isinstance(self.loss_segments, LossSegmentConfig):
+            self.loss_segments = LossSegmentConfig.from_dict(self.loss_segments)
 
     # ------------------------------------------------------------------
     # 序列化 / 反序列化
@@ -109,7 +117,11 @@ class BeaconConfig:
     def from_dict(cls, data: Dict[str, Any]) -> "BeaconConfig":
         """从 dict 构造，忽略未知字段。"""
         valid = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in data.items() if k in valid})
+        payload = {k: v for k, v in data.items() if k in valid}
+        # 嵌套的 loss_segments 在 YAML/JSON 里是 dict，需要还原成配置对象
+        if "loss_segments" in payload:
+            payload["loss_segments"] = LossSegmentConfig.from_dict(payload["loss_segments"])
+        return cls(**payload)
 
     # ------------------------------------------------------------------
     # 派生属性
@@ -137,6 +149,12 @@ class BeaconConfig:
 
     @classmethod
     def from_model_config(cls, model_config: Any) -> "BeaconConfig":
-        """从 HuggingFace model.config 读取 beacon 字段。"""
-        data = {f.name: getattr(model_config, f.name, f.default) for f in fields(cls)}
+        """从 HuggingFace model.config 读取 beacon 字段。
+
+        ``field_default`` 兼容 ``default_factory`` 字段（如 ``loss_segments``）：
+        旧 checkpoint 的 config.json 里没有该字段时回落到默认配置。
+        """
+        data = {
+            f.name: getattr(model_config, f.name, field_default(f)) for f in fields(cls)
+        }
         return cls.from_dict(data)

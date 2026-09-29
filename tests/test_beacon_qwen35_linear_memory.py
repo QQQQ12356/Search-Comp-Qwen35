@@ -92,7 +92,8 @@ def test_sparse_chunked_loss_matches_dense_cross_entropy():
     labels = torch.tensor([[10, -100, 20, 21, -100]])
     valid_num = (labels != -100).sum(-1)
 
-    sparse = model._sparse_window_loss(hidden, labels, valid_num).mean()
+    sparse, _weight_sum = model._sparse_window_loss(hidden, labels, valid_num)
+    sparse = sparse.mean()
     selected = labels[0] != -100
     dense = F.cross_entropy(
         model.lm_head(hidden[0, selected]).float(),

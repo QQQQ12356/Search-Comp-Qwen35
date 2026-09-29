@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer
 
 from .trajectory import build_loss_labels, build_search_chat_prompt, build_sequence_ids
+from ..loss_segments import LossSegmentConfig
 
 
 class InteractiveSFTDataset(Dataset):
@@ -28,15 +29,23 @@ class InteractiveSFTDataset(Dataset):
         data_path: JSONL 路径，每行 ``{id, question, answer, turns, thinks, final_think}``。
         tokenizer: HuggingFace tokenizer。
         max_length: 最大 token 数。
+        loss_segments: 分段损失配置；None 或全默认时不分段（逐 token 等权）。
     """
 
     def __init__(
-        self, data_path: str, tokenizer: PreTrainedTokenizer, max_length: int = 8192
+        self,
+        data_path: str,
+        tokenizer: PreTrainedTokenizer,
+        max_length: int = 8192,
+        loss_segments: Optional[LossSegmentConfig] = None,
     ):
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"数据文件不存在: {data_path}")
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.loss_segments = (
+            None if (loss_segments is None or loss_segments.is_default) else loss_segments
+        )
         self.samples: List[Dict[str, Any]] = []
         try:
             with open(data_path, "r", encoding="utf-8") as f:
@@ -60,8 +69,9 @@ class InteractiveSFTDataset(Dataset):
         """
         question = sample["question"]
         chat_input = build_search_chat_prompt(question, add_generation_prompt=True)
-        ids, doc_regions, gen_spans = build_sequence_ids(
-            self.tokenizer, chat_input, sample, max_length=self.max_length
+        ids, doc_regions, gen_spans, segment_ids = build_sequence_ids(
+            self.tokenizer, chat_input, sample, max_length=self.max_length,
+            loss_segments=self.loss_segments,
         )
         labels = build_loss_labels(len(ids), ids, gen_spans)
         return {
@@ -69,6 +79,7 @@ class InteractiveSFTDataset(Dataset):
             "question": question,
             "labels": labels,
             "regions": doc_regions,
+            "loss_segment_ids": segment_ids,
             "n_turns": len(sample["turns"]),
         }
 
@@ -117,4 +128,7 @@ class InteractiveCollator:
             **({"question_input_ids": torch.tensor([
                 self.tokenizer(f["question"], add_special_tokens=False).input_ids
             ], dtype=torch.long)} if self.question_memory_v1 else {}),
+            **({"loss_segment_ids": torch.tensor(
+                [f["loss_segment_ids"]], dtype=torch.long
+            )} if f.get("loss_segment_ids") is not None else {}),
         }

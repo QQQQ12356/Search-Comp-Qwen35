@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from ..loss_segments import SEGMENT_IGNORE, LossSegmentConfig, classify_assistant_text
 
 #: Search-R1 风格的搜索协议正文。该说明属于长期行为约束，因此放在 system 消息。
 SEARCH_INSTRUCTION = """Answer the given question. You must conduct reasoning inside <thinking> and </thinking> first every time you get new information. After reasoning, if you find you lack some knowledge, you can call a search engine by <search> query </search> and it will return the top searched results between <information> and </information>. You can search as many times as your want. If you find no further external knowledge needed, you can directly provide the answer inside <answer> and </answer>, without detailed illustrations. For example, <answer> Beijing </answer>."""
@@ -105,8 +107,12 @@ def build_assistant_segments(sample: Dict[str, Any]) -> List[Tuple[str, str]]:
 
 
 def build_sequence_ids(
-    tokenizer, chat_input: str, sample: Dict[str, Any], max_length: int = 8192
-) -> Tuple[List[int], List[Tuple[int, int]], List[Tuple[int, int]]]:
+    tokenizer,
+    chat_input: str,
+    sample: Dict[str, Any],
+    max_length: int = 8192,
+    loss_segments: Optional[LossSegmentConfig] = None,
+) -> Tuple[List[int], List[Tuple[int, int]], List[Tuple[int, int]], Optional[List[int]]]:
     """逐片段 tokenize 并拼接，返回训练/推理统一的 token 序列。
 
     Args:
@@ -114,19 +120,23 @@ def build_sequence_ids(
         chat_input: ``apply_chat_template(..., add_generation_prompt=True)`` 的结果。
         sample: 交互式样本。
         max_length: 最大 token 数（超出则截断，并丢弃被截断的压缩区/损失区）。
+        loss_segments: 分段损失配置；None 或全默认时不生成片段类别。
 
     Returns:
-        ``(ids, doc_regions, gen_spans)``：
+        ``(ids, doc_regions, gen_spans, loss_segment_ids)``：
         - ``ids``: 拼接后的 token id 列表。
         - ``doc_regions``: 各 ``<information>`` 文档块的 token 区间 ``[(start, end)]``。
         - ``gen_spans``: 各模型生成片段的 token 区间 ``[(start, end)]``（用于损失掩码）。
+        - ``loss_segment_ids``: 与 ``ids`` 等长的片段类别 id；未启用分段损失时为 None。
     """
     parts: List[Tuple[str, str]] = [(chat_input, "chat")]
     parts += build_assistant_segments(sample)
+    use_segments = loss_segments is not None and not loss_segments.is_default
 
     ids: List[int] = []
     doc_regions: List[Tuple[int, int]] = []
     gen_spans: List[Tuple[int, int]] = []
+    segment_ids: List[int] = []
     cursor = 0
     for text, kind in parts:
         seg_ids = tokenizer(text, add_special_tokens=False).input_ids
@@ -134,6 +144,13 @@ def build_sequence_ids(
             doc_regions.append((cursor, cursor + len(seg_ids)))
         elif kind == "gen":
             gen_spans.append((cursor, cursor + len(seg_ids)))
+        if use_segments and kind == "gen":
+            classified = classify_assistant_text(text, tokenizer)
+            if len(classified) != len(seg_ids):
+                classified = [SEGMENT_IGNORE] * len(seg_ids)
+            segment_ids.extend(classified)
+        else:
+            segment_ids.extend([SEGMENT_IGNORE] * len(seg_ids))
         ids.extend(seg_ids)
         cursor += len(seg_ids)
 
@@ -142,7 +159,8 @@ def build_sequence_ids(
         ids = ids[:max_length]
         doc_regions = [(s, e) for s, e in doc_regions if e <= max_length]
         gen_spans = [(s, e) for s, e in gen_spans if e <= max_length]
-    return ids, doc_regions, gen_spans
+        segment_ids = segment_ids[:max_length]
+    return ids, doc_regions, gen_spans, (segment_ids if use_segments else None)
 
 
 def build_loss_labels(
