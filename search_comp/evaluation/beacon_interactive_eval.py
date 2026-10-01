@@ -211,6 +211,9 @@ def main() -> None:
     tokenizer = load_text_tokenizer(args.model_path)
     model = load_beacon_qwen3_5(args.model_path)  # 从保存的 config 读取 beacon 字段
     model.eval()
+    # 打印 checkpoint 里**实际生效**的压缩区布局（不是命令行传的），
+    # 便于一眼确认评测的分窗方式与训练一致。
+    print(f"[beacon-eval] 压缩区布局: {model.beacon_config.describe_layout()}", flush=True)
 
     retriever = BM25Retriever(args.corpus_path)
     if args.questions_jsonl:

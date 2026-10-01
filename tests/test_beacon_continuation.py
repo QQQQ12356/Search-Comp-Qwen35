@@ -13,6 +13,7 @@ import os
 import torch
 
 from search_comp.data.trajectory import build_sequence_ids, split_document_regions
+from search_comp.models.beacon_config import BeaconConfig
 from search_comp.models.beacon_qwen3 import _Qwen3BeaconMemory
 from test_beacon_qwen35_linear_memory import _tiny_model
 
@@ -234,6 +235,27 @@ def test_keep_window_does_not_disturb_continuation_targets():
     merged_model.beacon_config.beacon_keep_window = 0
     merged = _supervised_window_starts(merged_model, ids, regions)
     assert default == merged == [6, 14]
+
+
+def test_describe_layout_reports_effective_settings():
+    """评测启动打印的那一行必须反映实际生效的布局，而不是默认值。"""
+    split = BeaconConfig(
+        beacon_window=96, beacon_stride=96, beacon_ratio=16,
+        beacon_doc_region_split=True, beacon_keep_window=1024,
+    ).describe_layout()
+    assert "子文档独立成段" in split
+    assert "每窗 6 个 beacon" in split
+    assert "keep_window=1024" in split
+
+    chunked = BeaconConfig(beacon_window=512, beacon_stride=512, beacon_ratio=16).describe_layout()
+    assert "整块成段" in chunked
+    assert "每窗 32 个 beacon" in chunked
+    assert "keep_window=跟随 window" in chunked
+
+    merged = BeaconConfig(
+        beacon_window=512, beacon_stride=512, beacon_ratio=16, beacon_keep_window=0,
+    ).describe_layout()
+    assert "keep_window=整段不切" in merged
 
 
 def test_prefill_produces_no_continuation_loss():

@@ -149,6 +149,25 @@ class BeaconConfig:
         """每个满窗口生成的 beacon 数量 = window // ratio。"""
         return self.beacon_window // self.beacon_ratio
 
+    def describe_layout(self) -> str:
+        """一行描述实际生效的压缩区布局（训练/评测启动时打印，便于确认与训练一致）。"""
+        blocks = (
+            "每个 <information> 子文档独立成段"
+            if self.beacon_doc_region_split
+            else "每个 <information> 块整块成段"
+        )
+        if self.beacon_keep_window is None:
+            keep = "跟随 window"
+        elif self.beacon_keep_window == 0:
+            keep = "整段不切"
+        else:
+            keep = str(self.beacon_keep_window)
+        return (
+            f"{blocks}；window={self.beacon_window} stride={self.beacon_stride} "
+            f"ratio={self.beacon_ratio} → 每窗 {self.beacon_size_per_window} 个 beacon；"
+            f"keep_window={keep}"
+        )
+
     def merge_into_config(self, model_config: Any) -> "BeaconConfig":
         """把 beacon 超参写入 HuggingFace model.config。
 
