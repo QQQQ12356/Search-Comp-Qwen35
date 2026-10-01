@@ -51,6 +51,7 @@ from .trajectory import (
     INFO_SUFFIX,
     SEARCH_INSTRUCTION,
     SYSTEM_PROMPT,
+    split_document_regions,
 )
 from ..loss_segments import SEGMENT_IGNORE, LossSegmentConfig, classify_assistant_text
 
@@ -148,6 +149,7 @@ class SearchR1SFTDataset(Dataset):
         tokenizer: HuggingFace tokenizer（Qwen3.5 系列）。
         loss_segments: 分段损失配置；为 None 或全默认时不生成 ``loss_segment_ids``，
             保持与历史行为一致（逐 token 等权）。
+        doc_region_split: 是否把每个 ``<information>`` 块按子文档切成多个压缩区。
     """
 
     def __init__(
@@ -155,10 +157,12 @@ class SearchR1SFTDataset(Dataset):
         data_path: str,
         tokenizer: PreTrainedTokenizer,
         loss_segments: Optional[LossSegmentConfig] = None,
+        doc_region_split: bool = False,
     ):
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"数据文件不存在: {data_path}\n{SEARCH_R1_DATA_HINT}")
         self.tokenizer = tokenizer
+        self.doc_region_split = doc_region_split
         # 全默认权重等价于不加权，此时连分类都不做（省一次带 offset 的分词）
         self.loss_segments = None if (loss_segments is None or loss_segments.is_default) else loss_segments
         self.samples: List[Dict[str, Any]] = []
@@ -231,11 +235,16 @@ class SearchR1SFTDataset(Dataset):
                         "Search-R1 首个 assistant 消息后的 user 消息必须是 "
                         f"完整 <information> 块: {sample.get('id', msg_idx)}"
                     )
-                docs_ids = self.tokenizer(info_match.group(1), add_special_tokens=False).input_ids
+                docs_text = info_match.group(1)
+                docs_ids = self.tokenizer(docs_text, add_special_tokens=False).input_ids
                 prefix_ids = self.tokenizer(INFO_PREFIX, add_special_tokens=False).input_ids
                 suffix_ids = self.tokenizer(INFO_SUFFIX, add_special_tokens=False).input_ids
                 start = len(input_ids) + len(prefix_ids)
-                regions.append((start, start + len(docs_ids)))
+                if self.doc_region_split:
+                    for sub_start, sub_end in split_document_regions(docs_text, self.tokenizer):
+                        regions.append((start + sub_start, start + sub_end))
+                else:
+                    regions.append((start, start + len(docs_ids)))
                 seg_ids = prefix_ids + docs_ids + suffix_ids
                 labels.extend([-100] * len(seg_ids))
                 segment_ids.extend([SEGMENT_IGNORE] * len(seg_ids))

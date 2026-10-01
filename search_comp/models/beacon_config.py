@@ -53,6 +53,18 @@ class BeaconConfig:
     beacon_question_memory_v1: bool = False
     beacon_question_max_tokens: int = 128
     beacon_readout_distill_weight: float = 0.1
+    #: 把 ``<information>`` 块按子文档切成多个压缩区（每篇文档独立一个窗口序列）。
+    #: 开启后「同一压缩段的非首窗」等价于「同一篇文档的续写窗」，供续写损失使用。
+    beacon_doc_region_split: bool = False
+    #: 非首窗续写损失权重。0 表示关闭（默认，逐位等价于历史行为）。
+    beacon_continuation_loss_weight: float = 0.0
+    #: 每个续写窗监督的前 k 个 token；这些位置只能依赖已提交的 beacon 记忆。
+    beacon_continuation_tokens: int = 4
+    #: keep 段（提示词 / 模型生成内容）的切窗长度：``None`` = 跟随 ``beacon_window``
+    #: （历史行为）；``0`` = 整段不切；``>0`` = 上限，超出才切（防长序列 O(L²) 注意力
+    #: 显存）。keep 段的切窗粒度**不影响结果**（该窗全部 K/V 都会提交、位置全局单调、
+    #: 卷积/循环状态跨窗携带），只影响前向次数与峰值显存。
+    beacon_keep_window: Optional[int] = None
     #: 训练 loss 的有效 token 分块大小；避免一次生成超大词表 logits
     beacon_loss_chunk_size: int = 64
     #: loss 分块是否使用 activation checkpoint，在反向时重算 LM head
@@ -71,6 +83,12 @@ class BeaconConfig:
             raise ValueError("beacon_question_max_tokens 必须为正数")
         if not 0 <= self.beacon_readout_distill_weight < float("inf"):
             raise ValueError("beacon_readout_distill_weight 必须为有限非负数")
+        if not 0 <= self.beacon_continuation_loss_weight < float("inf"):
+            raise ValueError("beacon_continuation_loss_weight 必须为有限非负数")
+        if self.beacon_continuation_tokens <= 0:
+            raise ValueError("beacon_continuation_tokens 必须为正数")
+        if self.beacon_keep_window is not None and self.beacon_keep_window < 0:
+            raise ValueError("beacon_keep_window 必须为 None（跟随 beacon_window）、0（不切）或正整数")
         if self.enable_beacon:
             assert (
                 self.beacon_window >= self.beacon_stride

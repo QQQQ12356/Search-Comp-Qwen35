@@ -112,6 +112,7 @@ def build_sequence_ids(
     sample: Dict[str, Any],
     max_length: int = 8192,
     loss_segments: Optional[LossSegmentConfig] = None,
+    doc_region_split: bool = False,
 ) -> Tuple[List[int], List[Tuple[int, int]], List[Tuple[int, int]], Optional[List[int]]]:
     """逐片段 tokenize 并拼接，返回训练/推理统一的 token 序列。
 
@@ -121,6 +122,9 @@ def build_sequence_ids(
         sample: 交互式样本。
         max_length: 最大 token 数（超出则截断，并丢弃被截断的压缩区/损失区）。
         loss_segments: 分段损失配置；None 或全默认时不生成片段类别。
+        doc_region_split: 为 True 时把每个 ``<information>`` 块按**子文档**切成多个
+            压缩区（见 :func:`split_document_regions`），使「同一压缩段的非首窗」
+            等价于「同一篇文档的续写窗」；False 时整块一个压缩区（历史行为）。
 
     Returns:
         ``(ids, doc_regions, gen_spans, loss_segment_ids)``：
@@ -141,7 +145,13 @@ def build_sequence_ids(
     for text, kind in parts:
         seg_ids = tokenizer(text, add_special_tokens=False).input_ids
         if kind == "docs":
-            doc_regions.append((cursor, cursor + len(seg_ids)))
+            if doc_region_split:
+                doc_regions.extend(
+                    (cursor + start, cursor + end)
+                    for start, end in split_document_regions(text, tokenizer)
+                )
+            else:
+                doc_regions.append((cursor, cursor + len(seg_ids)))
         elif kind == "gen":
             gen_spans.append((cursor, cursor + len(seg_ids)))
         if use_segments and kind == "gen":
@@ -182,6 +192,44 @@ def build_loss_labels(
     return labels
 
 
+def split_document_regions(text: str, tokenizer) -> List[Tuple[int, int]]:
+    """把 ``<information>`` 块文本按子文档切成 token 区间（相对块起点）。
+
+    子文档边界由 :data:`_INDEXED_DOC_SPLIT`（``Doc <n> `` 前缀）给出，再用 tokenizer
+    的 ``offset_mapping`` 把起始字符映射到 token 下标。分词器不支持 offset mapping、
+    或未识别到任何子文档边界时，退化为「整块一个区间」，因此调用方可以无条件使用。
+
+    Args:
+        text: ``<information>`` 块内的文档文本（即压缩区原文）。
+        tokenizer: HuggingFace 分词器；需要支持 ``return_offsets_mapping``。
+
+    Returns:
+        按顺序覆盖整块、互不重叠的半开区间 ``[(start, end), ...]``；空文本返回 ``[]``。
+    """
+    encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    ids = encoded["input_ids"]
+    if not ids:
+        return []
+    offsets = encoded.get("offset_mapping")
+    if offsets is None:
+        return [(0, len(ids))]
+    bounds = {0}
+    for match in _DOC_START.finditer(text):
+        index = _char_to_token_index(offsets, match.end())
+        if 0 < index < len(ids):
+            bounds.add(index)
+    edges = sorted(bounds) + [len(ids)]
+    return [(edges[i], edges[i + 1]) for i in range(len(edges) - 1)]
+
+
+def _char_to_token_index(offsets, char_index: int) -> int:
+    """字符下标 -> token 下标（起始字符 >= char_index 的第一个 token）。"""
+    for index, (start, _end) in enumerate(offsets):
+        if start is not None and start >= char_index:
+            return index
+    return len(offsets)
+
+
 # ----------------------------------------------------------------------
 # <information> 内的检索文档：训练与评测统一的格式
 # ----------------------------------------------------------------------
@@ -219,6 +267,8 @@ _TITLED_DOC_HEADER = re.compile(r"Doc\s+\d+\s*\(Title:\s*(.*?)\)\s*", re.DOTALL)
 _INDEXED_DOC_HEADER = re.compile(r"Doc\s+\d+\s+")
 #: 统一格式的切分点：块首或空行之后的 ``Doc N ``，避免正文里的同形文本被误切。
 _INDEXED_DOC_SPLIT = re.compile(r"(?m)(?=(?:\A|\n\n)Doc \d+ )")
+#: 子文档**起始字符**位置（分隔空行之后，与 :data:`_INDEXED_DOC_SPLIT` 同源）。
+_DOC_START = re.compile(r"(?m)(?:\A|\n\n)(?=Doc \d+ )")
 
 
 def document_body(title: str, text: str) -> str:

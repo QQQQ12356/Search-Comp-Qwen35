@@ -31,6 +31,7 @@ from ..data.trajectory import (
     INFO_SUFFIX,
     build_search_chat_prompt,
     extract_search_query,
+    split_document_regions,
 )
 from ..models.beacon_config import BeaconConfig
 from .budget import MAX_NEW_TOKENS_PER_TURN, MAX_TURNS
@@ -96,6 +97,10 @@ def run_beacon_agent(model, tokenizer, retriever, question, max_turns=MAX_TURNS,
     turns = 0
 
     device = next(model.parameters()).device
+    # 压缩区布局必须与训练一致：训练开了子文档切分，推理也要切。
+    # 只认真正的 bool——测试里的 Mock 模型会让 getattr 返回真值对象。
+    _split_flag = getattr(getattr(model, "beacon_config", None), "beacon_doc_region_split", False)
+    doc_region_split = _split_flag if isinstance(_split_flag, bool) else False
     question_kwargs = {}
     if getattr(getattr(model, "beacon_config", None), "beacon_question_memory_v1", False):
         question_kwargs["question_input_ids"] = torch.tensor(
@@ -130,9 +135,13 @@ def run_beacon_agent(model, tokenizer, retriever, question, max_turns=MAX_TURNS,
             isuf = tokenizer(INFO_SUFFIX, add_special_tokens=False).input_ids
             docs_start = len(context_ids) + len(ip)
             context_ids = context_ids + ip + di + isuf
-            regions.append((docs_start, docs_start + len(di)))
+            sub_regions = (
+                split_document_regions(docs_text, tokenizer)
+                if doc_region_split else [(0, len(di))]
+            )
+            regions.extend((docs_start + s, docs_start + e) for s, e in sub_regions)
             pending_ids = ip + di + isuf
-            pending_regions = [(len(ip), len(ip) + len(di))]
+            pending_regions = [(len(ip) + s, len(ip) + e) for s, e in sub_regions]
             reuse_cache = True
         else:
             break

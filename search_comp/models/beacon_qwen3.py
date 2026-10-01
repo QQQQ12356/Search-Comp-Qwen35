@@ -304,6 +304,10 @@ class _Qwen3BeaconMemory:
         self._question = None
         self._question_input_ids = None
         self._readout_losses = []
+        # 续写监督：全局移位的 token id、当前窗口的目标切片、跨窗口损失累积
+        self._cont_losses: List[torch.Tensor] = []
+        self._shifted_ids: Optional[torch.Tensor] = None
+        self._step_cont_targets: Optional[torch.Tensor] = None
         # 分段损失：全序列逐位置权重，以及当前窗口的切片
         self._seq_weights: Optional[torch.Tensor] = None
         self._step_weights: Optional[torch.Tensor] = None
@@ -321,6 +325,12 @@ class _Qwen3BeaconMemory:
         if labels is not None:
             labels = torch.cat([labels[:, 1:], labels.new_full((labels.shape[0], 1), -100)], dim=1)
         self._labels = labels
+        # 续写损失的目标：全局移位的原始 token id（位置 i 的目标是 token i+1）。
+        # 只在训练（labels 非 None）且开启时构造，推理路径完全不做额外工作。
+        if labels is not None and self.beacon.beacon_continuation_loss_weight > 0:
+            self._shifted_ids = torch.cat(
+                [input_ids[:, 1:], input_ids.new_full((input_ids.shape[0], 1), -100)], dim=1
+            )
         # 片段类别描述的是「被监督的那个 token」，因此与 labels 同步移位，
         # 再按配置查表转成逐位置权重（SEGMENT_IGNORE 位置权重 0）。
         if loss_segment_ids is not None:
@@ -356,7 +366,15 @@ class _Qwen3BeaconMemory:
         start = self._pos
 
         if mode == "keep":
-            end = min(start + window, seg_end)
+            # keep 段切窗粒度不影响结果（全部 K/V 提交、位置全局单调、状态跨窗携带），
+            # 只影响前向次数与峰值显存：None 跟随 window（历史行为）、0 整段不切、
+            # >0 为上限（防长序列 O(L²) 注意力显存）。
+            keep_window = self.beacon.beacon_keep_window
+            if keep_window is None:
+                keep_window = window
+            elif keep_window == 0:
+                keep_window = seg_end - start
+            end = min(start + keep_window, seg_end)
             beacon_size = 0
             store = "cache"
         else:
@@ -367,6 +385,18 @@ class _Qwen3BeaconMemory:
             else:
                 beacon_size = max(1, (remaining + self.beacon.beacon_ratio - 1) // self.beacon.beacon_ratio)
             store = "beacon"
+
+        # 续写监督：同一压缩段的**非首窗**头部若干 token。开启 doc_region_split 后，
+        # 压缩段即单篇子文档，因此非首窗等价于「同一篇文档的续写窗」。
+        self._step_cont_targets = None
+        if (mode == "compress"
+                and self.beacon.beacon_continuation_loss_weight > 0
+                and self.beacon.beacon_pos == "append"
+                and self._shifted_ids is not None
+                and start > seg_start):
+            stop = min(start + self.beacon.beacon_continuation_tokens, end)
+            if stop > start:
+                self._step_cont_targets = self._shifted_ids[:, start:stop]
 
         input_ids = self._input_ids[:, start:end]
         labels = self._labels[:, start:end] if self._labels is not None else None
@@ -674,6 +704,16 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
                     hidden, win_labels, valid_num, self._mem._step_weights
                 )
                 self._mem.update_loss(batch_loss, weight_sum)
+            # 续写损失：独立项（不进主 CE）。decode 路径 win_labels 为 None，
+            # 因此不会读到 prefill 遗留的 _step_cont_targets。
+            cont_targets = self._mem._step_cont_targets
+            if cont_targets is not None:
+                cont_labels = win_ids.new_full(win_ids.shape, -100)
+                cont_labels[:, : cont_targets.shape[1]] = cont_targets
+                cont_valid = (cont_labels != -100).sum(-1)
+                if cont_valid.sum().item() > 0:
+                    cont_loss, _ = self._sparse_window_loss(hidden, cont_labels, cont_valid, None)
+                    self._mem._cont_losses.append(cont_loss.mean())
         elif last_logits_only:
             logits = self.lm_head(hidden[:, -1:, :]).float()
         else:
@@ -822,6 +862,10 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         if self._mem._readout_losses:
             loss = loss + self.beacon_config.beacon_readout_distill_weight * torch.stack(self._mem._readout_losses).mean()
             self._mem._readout_losses = []
+        if self._mem._cont_losses:
+            loss = loss + self.beacon_config.beacon_continuation_loss_weight * \
+                torch.stack(self._mem._cont_losses).mean()
+            self._mem._cont_losses = []
         return loss, last_logits
 
     # ------------------------------------------------------------------

@@ -29,6 +29,7 @@ from ..data.trajectory import (
     INFO_SUFFIX,
     build_search_chat_prompt,
     extract_search_query,
+    split_document_regions,
 )
 from ..models.model_loader import load_model, load_tokenizer
 from .budget import MAX_NEW_TOKENS_PER_TURN, MAX_TURNS
@@ -66,6 +67,10 @@ def run_interactive_agent(
     if not question.endswith("?"):
         question += "?"
 
+    # 压缩区布局必须与训练一致：训练开了子文档切分，推理也要切。
+    # 只认真正的 bool——测试里的 Mock 模型会让 getattr 返回真值对象。
+    _split_flag = getattr(getattr(model, "beacon_config", None), "beacon_doc_region_split", False)
+    doc_region_split = _split_flag if isinstance(_split_flag, bool) else False
     chat_prefix_text = build_search_chat_prompt(question, add_generation_prompt=True)
     context_ids = tokenizer(chat_prefix_text, add_special_tokens=False).input_ids
     regions: List[tuple] = []
@@ -108,7 +113,11 @@ def run_interactive_agent(
             info_suffix_ids = tokenizer(INFO_SUFFIX, add_special_tokens=False).input_ids
             docs_start = len(context_ids) + len(info_prefix_ids)
             context_ids = context_ids + info_prefix_ids + docs_ids + info_suffix_ids
-            regions.append((docs_start, docs_start + len(docs_ids)))
+            sub_regions = (
+                split_document_regions(docs_text, tokenizer)
+                if doc_region_split else [(0, len(docs_ids))]
+            )
+            regions.extend((docs_start + s, docs_start + e) for s, e in sub_regions)
         else:
             # 未触发搜索（直接回答或已耗尽生成长度）
             break

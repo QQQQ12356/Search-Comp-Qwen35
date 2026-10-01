@@ -30,6 +30,7 @@ class InteractiveSFTDataset(Dataset):
         tokenizer: HuggingFace tokenizer。
         max_length: 最大 token 数。
         loss_segments: 分段损失配置；None 或全默认时不分段（逐 token 等权）。
+        doc_region_split: 是否把每个 ``<information>`` 块按子文档切成多个压缩区。
     """
 
     def __init__(
@@ -38,11 +39,13 @@ class InteractiveSFTDataset(Dataset):
         tokenizer: PreTrainedTokenizer,
         max_length: int = 8192,
         loss_segments: Optional[LossSegmentConfig] = None,
+        doc_region_split: bool = False,
     ):
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"数据文件不存在: {data_path}")
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.doc_region_split = doc_region_split
         self.loss_segments = (
             None if (loss_segments is None or loss_segments.is_default) else loss_segments
         )
@@ -71,7 +74,7 @@ class InteractiveSFTDataset(Dataset):
         chat_input = build_search_chat_prompt(question, add_generation_prompt=True)
         ids, doc_regions, gen_spans, segment_ids = build_sequence_ids(
             self.tokenizer, chat_input, sample, max_length=self.max_length,
-            loss_segments=self.loss_segments,
+            loss_segments=self.loss_segments, doc_region_split=self.doc_region_split,
         )
         labels = build_loss_labels(len(ids), ids, gen_spans)
         return {

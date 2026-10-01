@@ -61,9 +61,21 @@ beacon:
   beacon_question_memory_v1: false
   beacon_question_max_tokens: 128
   beacon_readout_distill_weight: 0.1
-  beacon_window: 512
-  beacon_stride: 512
+  # 子文档压缩区切分 + 非首窗续写损失。window 必须**小于子文档长度**才会有第二个
+  # 窗口，否则续写损失恒不触发。实测 Search-R1 语料子文档长度 p50=154 / max=310
+  # token（Qwen3.5-2B 分词器，300 样本 / 1302 个子文档）：
+  #   window=512 → 覆盖率 0%（每个子文档仅 1 窗）；window=96 → 覆盖率 100%、平均 2.03 窗。
+  beacon_doc_region_split: true
+  beacon_continuation_loss_weight: 0.1
+  beacon_continuation_tokens: 4
+  beacon_window: 96
+  beacon_stride: 96
   beacon_ratio: 16
+  # keep 段（提示词 / 模型生成内容）不逐窗切分：切窗粒度不影响结果，只影响前向次数
+  # 与峰值显存。实测 keep 段长度 p50=236 / p99=641 / max=1288 token；不切窗使
+  # keep 前向从 2294 降到 734（-68%）。1024 是长尾保护上限（超出才切），
+  # 设为 0 即完全不切，None 为历史行为（跟随 beacon_window）。
+  beacon_keep_window: 1024
   beacon_param: "q k v"
   beacon_embed_init: "eos"
   beacon_pos: "append"

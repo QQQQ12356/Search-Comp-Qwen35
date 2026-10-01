@@ -60,7 +60,7 @@ def _cuda_memory_snapshot() -> dict:
     }
 
 
-def _sample_length_summary(dataset, sample_size: int, seed: int) -> dict:
+def _sample_length_summary(dataset, sample_size: int, seed: int, beacon_window: int = None) -> dict:
     sample_size = min(max(sample_size, 0), len(dataset))
     if sample_size == 0:
         return {"sampled": 0}
@@ -69,18 +69,21 @@ def _sample_length_summary(dataset, sample_size: int, seed: int) -> dict:
     lengths = []
     supervised = []
     information = []
+    regions = []
     for index in indices:
         item = dataset[index]
         lengths.append(len(item["input_ids"]))
         supervised.append(sum(label != -100 for label in item["labels"]))
-        information.append(sum(end - start for start, end in item.get("regions", [])))
+        sample_regions = item.get("regions", [])
+        regions.extend(end - start for start, end in sample_regions)
+        information.append(sum(end - start for start, end in sample_regions))
 
     def percentile(values, fraction):
         ordered = sorted(values)
         position = min(len(ordered) - 1, int((len(ordered) - 1) * fraction))
         return ordered[position]
 
-    return {
+    summary = {
         "sampled": sample_size,
         "tokens": {
             "min": min(lengths), "p50": percentile(lengths, 0.50),
@@ -96,6 +99,18 @@ def _sample_length_summary(dataset, sample_size: int, seed: int) -> dict:
             "p95": percentile(information, 0.95), "max": max(information),
         },
     }
+    if beacon_window and regions:
+        # 压缩区长度 > beacon_window 才会产生第 2 个窗口，即续写监督的前提。
+        multi_window = sum(1 for size in regions if size > beacon_window)
+        summary["compress_regions"] = {
+            "count": len(regions),
+            "p50": percentile(regions, 0.50),
+            "p95": percentile(regions, 0.95),
+            "max": max(regions),
+            "gt_beacon_window": multi_window,
+            "gt_beacon_window_ratio": round(multi_window / len(regions), 4),
+        }
+    return summary
 
 
 class _SaveBeaconCheckpoints(TrainerCallback):
@@ -215,24 +230,28 @@ def main_train(
         from ..data.searchr1_dataset import SearchR1Collator, SearchR1SFTDataset
 
         train_ds = SearchR1SFTDataset(
-            cfg["train_data_path"], tokenizer, loss_segments=loss_segments
+            cfg["train_data_path"], tokenizer, loss_segments=loss_segments,
+            doc_region_split=beacon_cfg.beacon_doc_region_split,
         )
         collator = SearchR1Collator(tokenizer, question_memory_v1=beacon_cfg.beacon_question_memory_v1)
         eval_ds = (
-            SearchR1SFTDataset(cfg["val_data_path"], tokenizer, loss_segments=loss_segments)
+            SearchR1SFTDataset(
+                cfg["val_data_path"], tokenizer, loss_segments=loss_segments,
+                doc_region_split=beacon_cfg.beacon_doc_region_split,
+            )
             if cfg.get("val_data_path") else None
         )
         print(f"[beacon] data_mode=searchr1，{len(train_ds)} 条 Search-R1 SFT 轨迹", flush=True)
     else:
         train_ds = InteractiveSFTDataset(
             cfg["train_data_path"], tokenizer, max_length=cfg.get("max_length", 8192),
-            loss_segments=loss_segments,
+            loss_segments=loss_segments, doc_region_split=beacon_cfg.beacon_doc_region_split,
         )
         collator = InteractiveCollator(tokenizer, question_memory_v1=beacon_cfg.beacon_question_memory_v1)
         eval_ds = (
             InteractiveSFTDataset(
                 cfg["val_data_path"], tokenizer, max_length=cfg.get("max_length", 8192),
-                loss_segments=loss_segments,
+                loss_segments=loss_segments, doc_region_split=beacon_cfg.beacon_doc_region_split,
             )
             if cfg.get("val_data_path") else None
         )
@@ -309,6 +328,7 @@ def main_train(
         train_ds,
         int(cfg.get("length_diagnostics_samples", 256)),
         int(cfg.get("seed", 42)),
+        beacon_window=beacon_cfg.beacon_window,
     )
     write_json(
         os.path.join(exp_dir, "dataset_summary.json"),
