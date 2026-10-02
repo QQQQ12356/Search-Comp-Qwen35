@@ -60,6 +60,17 @@ class BeaconConfig:
     beacon_continuation_loss_weight: float = 0.0
     #: 每个续写窗监督的前 k 个 token；这些位置只能依赖已提交的 beacon 记忆。
     beacon_continuation_tokens: int = 4
+    #: 续写监督的粒度：``False`` = 每个压缩段的**非首窗窗头** ``beacon_continuation_tokens``
+    #: 个 token（历史行为）；``True`` = 每个 **chunk 边界**由该 chunk 的 beacon 监督下一个
+    #: chunk 的首 token，此时 ``beacon_continuation_tokens`` 不生效。
+    #:
+    #: 开启后强制 ``beacon_window == beacon_ratio``（每个窗口恰好一个 chunk）。隔离来自
+    #: **窗口边界**而不是注意力掩码：窗末只提交 beacon、丢弃原始 K/V，后续 chunk 因此只能
+    #: 看见已提交的 beacon。掩码做不到这件事 —— ``attn_mask`` 只作用于 full-attention 层，
+    #: 18 个 linear-attention 层是无掩码的循环扫描，窗内跨 chunk 的原始 token 仍会经残差流
+    #: 泄漏。窗口大于 ratio 时，窗内 beacon 仍能直接看见本窗更早的原始 token，
+    #: 「仅凭压缩记忆预测」的语义不再成立。
+    beacon_continuation_per_beacon: bool = False
     #: keep 段（提示词 / 模型生成内容）的切窗长度：``None`` = 跟随 ``beacon_window``
     #: （历史行为）；``0`` = 整段不切；``>0`` = 上限，超出才切（防长序列 O(L²) 注意力
     #: 显存）。keep 段的切窗粒度**不影响结果**（该窗全部 K/V 都会提交、位置全局单调、
@@ -87,6 +98,12 @@ class BeaconConfig:
             raise ValueError("beacon_continuation_loss_weight 必须为有限非负数")
         if self.beacon_continuation_tokens <= 0:
             raise ValueError("beacon_continuation_tokens 必须为正数")
+        if self.beacon_continuation_per_beacon and self.beacon_window != self.beacon_ratio:
+            raise ValueError(
+                "beacon_continuation_per_beacon 需要 beacon_window == beacon_ratio"
+                f"（当前 {self.beacon_window} != {self.beacon_ratio}）："
+                "只有每个窗口恰好一个 chunk，后续 chunk 才只能看见已提交的 beacon"
+            )
         if self.beacon_keep_window is not None and self.beacon_keep_window < 0:
             raise ValueError("beacon_keep_window 必须为 None（跟随 beacon_window）、0（不切）或正整数")
         if self.enable_beacon:
@@ -162,10 +179,20 @@ class BeaconConfig:
             keep = "整段不切"
         else:
             keep = str(self.beacon_keep_window)
+        if self.beacon_continuation_loss_weight <= 0:
+            continuation = "续写监督=关闭"
+        elif self.beacon_continuation_per_beacon:
+            continuation = "续写监督=每 beacon 1 个"
+        elif self.beacon_pos == "append":
+            continuation = f"续写监督=每窗头 {self.beacon_continuation_tokens} 个"
+        else:
+            # 窗头监督只在 append 布局产生（见 beacon_qwen3._build_cont_labels）；
+            # 这里必须如实报告「权重设了但不会生效」，否则打印反而掩盖 train/eval 漂移。
+            continuation = "续写监督=关闭（intersect 不产生窗头监督）"
         return (
             f"{blocks}；window={self.beacon_window} stride={self.beacon_stride} "
             f"ratio={self.beacon_ratio} → 每窗 {self.beacon_size_per_window} 个 beacon；"
-            f"keep_window={keep}"
+            f"keep_window={keep}；{continuation}"
         )
 
     def merge_into_config(self, model_config: Any) -> "BeaconConfig":

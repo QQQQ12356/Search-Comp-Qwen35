@@ -1,15 +1,19 @@
-"""子文档压缩区切分 + 非首窗续写损失。
+"""子文档压缩区切分 + 续写损失。
 
 覆盖：
 
 - :func:`split_document_regions` 的边界定位、单文档与降级路径；
 - :func:`build_sequence_ids` 在 ``doc_region_split`` 下产出逐子文档的压缩区；
-- 续写损失：只有一个窗口的压缩区是**严格 no-op**；跨两个窗口时才产生损失与梯度；
+- window 模式续写损失：只有一个窗口的压缩区是**严格 no-op**；跨两个窗口时才产生损失与梯度；
+- beacon 模式续写损失（``beacon_continuation_per_beacon`` + ``beacon_window == beacon_ratio``）：
+  每个窗口恰好一个 chunk，窗尾 beacon 的全层型 chunk 隔离使「后续 chunk 只看得见已
+  提交的 beacon」成立；监督目标是下一个 chunk 的首 token，只在同一压缩段内跨窗；
 - 推理路径（``labels is None``）不产生任何续写损失。
 """
 
 import os
 
+import pytest
 import torch
 
 from search_comp.data.trajectory import build_sequence_ids, split_document_regions
@@ -172,7 +176,7 @@ def _supervised_window_starts(model, ids, regions):
     while not model._mem.finish:
         start = model._mem._pos
         model._mem.step()
-        if model._mem._step_cont_targets is not None:
+        if model._mem._step_cont_labels is not None:
             starts.append(start)
     return starts
 
@@ -264,3 +268,183 @@ def test_prefill_produces_no_continuation_loss():
     memory = model.prefill_and_get_cache(IDS, regions=[(2, 10)])
     assert memory._cont_losses == []
     assert memory._shifted_ids is None
+
+
+# ----------------------------------------------------------------------
+# 续写损失：按 beacon 生效（intersect 布局）
+# ----------------------------------------------------------------------
+def _make_per_beacon_model(weight: float):
+    """``beacon_window == beacon_ratio``（每窗一个 chunk）+ 按 beacon 监督。
+
+    隔离来自窗口边界而非掩码：窗末只提交 beacon、丢弃原始 K/V，于是后续 chunk 只能
+    看见已提交的 beacon。这对 full-attention 与 linear-attention 层同时成立。
+    """
+    torch.manual_seed(7)
+    model = _tiny_model("intersect")
+    model.beacon_config.beacon_window = 2
+    model.beacon_config.beacon_stride = 2
+    model.beacon_config.beacon_continuation_loss_weight = weight
+    model.beacon_config.beacon_continuation_per_beacon = True
+    return model.eval()
+
+
+def _supervised_beacon_targets(model, ids, regions):
+    """逐窗走状态机，返回被监督的 ``(窗起点, 目标 token 的全局位置)``。"""
+    model._mem = _Qwen3BeaconMemory(model, model.beacon_config)
+    model._mem.prepare(ids, ids.clone(), regions)
+    position_of = {int(token): pos for pos, token in enumerate(ids[0].tolist())}
+    targets = []
+    while not model._mem.finish:
+        start = model._mem._pos
+        model._mem.step()
+        labels = model._mem._step_cont_labels
+        if labels is None:
+            continue
+        for local in (labels[0] != -100).nonzero().flatten().tolist():
+            targets.append((start, position_of[int(labels[0, local])]))
+    return targets
+
+
+def test_per_beacon_requires_window_equal_ratio():
+    """每个窗口必须恰好一个 chunk，否则窗内 beacon 仍能看见本窗更早的原始 token。"""
+    with pytest.raises(ValueError, match="beacon_window == beacon_ratio"):
+        BeaconConfig(beacon_window=4, beacon_stride=4, beacon_ratio=2,
+                     beacon_continuation_per_beacon=True)
+
+
+def test_per_beacon_supervises_token_after_every_beacon():
+    """window=ratio=2 → 每窗 1 个 chunk，尾部 beacon 监督下一个 chunk 的首 token。"""
+    model = _make_per_beacon_model(0.5)
+    assert _supervised_beacon_targets(model, IDS, [(2, 10)]) == [(2, 4), (4, 6), (6, 8)]
+
+
+def test_per_beacon_fires_for_single_window_document():
+    """单窗压缩段在 window 模式下是 no-op；beacon 模式下仍监督其唯一的 chunk 边界。"""
+    model = _make_per_beacon_model(0.5)
+    assert _supervised_beacon_targets(model, IDS, [(2, 6)]) == [(2, 4)]
+
+
+def test_per_beacon_never_continues_across_document_boundary():
+    """段尾那个跨窗 beacon 只在同一压缩段内续写，不得预测下一篇文档首 token。"""
+    ids = torch.arange(10, 28, device=DEVICE).unsqueeze(0)
+    model = _make_per_beacon_model(0.5)
+    assert _supervised_beacon_targets(model, ids, [(2, 10), (10, 18)]) == [
+        (2, 4), (4, 6), (6, 8), (10, 12), (12, 14), (14, 16),
+    ]
+
+
+def test_per_beacon_is_layout_agnostic_when_window_equals_ratio():
+    """window==ratio 时 append 与 intersect 是同一套布局，监督点必须一致。"""
+    targets = []
+    for beacon_pos in ("append", "intersect"):
+        torch.manual_seed(7)
+        model = _tiny_model(beacon_pos)
+        model.beacon_config.beacon_window = 2
+        model.beacon_config.beacon_stride = 2
+        model.beacon_config.beacon_continuation_loss_weight = 0.5
+        model.beacon_config.beacon_continuation_per_beacon = True
+        targets.append(_supervised_beacon_targets(model, IDS, [(2, 10)]))
+    assert targets[0] == targets[1] == [(2, 4), (4, 6), (6, 8)]
+
+
+def test_window_equals_ratio_commits_only_the_beacon():
+    """隔离机制：窗末只提交 beacon，原始文档 K/V 不进入后续 chunk 的可见范围。
+
+    掩码做不到这件事（它只作用于 full-attention 层），所以这里断言的是缓存里
+    **实际被提交的位置数**，而不是注意力可见性。
+    """
+    model = _make_per_beacon_model(0.0)
+    mem = _Qwen3BeaconMemory(model, model.beacon_config)
+    model._mem = mem
+    mem.prepare(IDS, None, [(2, 10)])
+    while not mem.finish:
+        win_ids, _, attn_mask, pos_emb, past = mem.step()
+        cur_len, store = win_ids.shape[1], mem._store
+        lengths_before = [0 if ck is None else ck.shape[2] for ck, _ in mem._cache]
+        new_past, _ = model._native_forward(win_ids, None, attn_mask, pos_emb, past)
+        mem.update_memory(new_past)
+        if store == "beacon":
+            lengths_after = [0 if ck is None else ck.shape[2] for ck, _ in mem._cache]
+            growth = [after - before for after, before in zip(lengths_after, lengths_before)]
+            full_attn = [g for g, t in zip(growth, mem.layer_types) if t == "full_attention"]
+            assert full_attn, "该模型没有 full-attention 层，无法断言"
+            assert all(g == 1 for g in full_attn), f"每个压缩窗应只提交 1 个 beacon，实际 {full_attn}"
+            assert cur_len == 3, f"该窗口送入了 {cur_len} 个位置，却只提交 1 个"
+            break
+
+
+def test_per_beacon_supervises_exactly_one_point_per_chunk():
+    """window==ratio 下每个窗口只有一个 chunk：监督点必须是尾部 beacon，且不被重复计数。"""
+    model = _make_per_beacon_model(0.5)
+    targets = _supervised_beacon_targets(model, IDS, [(2, 10)])
+    starts = [start for start, _ in targets]
+    assert starts == sorted(set(starts)), "同一窗口产生了多个监督点"
+    assert all(target == start + model.beacon_config.beacon_window
+               for start, target in targets), "监督目标不是紧邻的下一窗口首 token"
+
+
+def test_per_beacon_weight_zero_builds_no_targets():
+    model = _make_per_beacon_model(0.0)
+    assert _supervised_beacon_targets(model, IDS, [(2, 10)]) == []
+
+
+def test_intersect_without_per_beacon_keeps_no_continuation_loss():
+    """intersect 布局 + 关闭 per_beacon → 逐位等价历史行为（无续写监督）。"""
+    torch.manual_seed(7)
+    model = _tiny_model("intersect")
+    model.beacon_config.beacon_continuation_loss_weight = 0.5
+    assert _supervised_beacon_targets(model, IDS, [(2, 10)]) == []
+
+
+def test_per_beacon_gradients_reach_beacon_parameters():
+    """labels 全 -100 时主 CE 为 0，梯度只能来自按 beacon 的续写损失。"""
+    model = _make_per_beacon_model(0.5).train()
+    labels = torch.full_like(IDS, -100)
+    loss = _loss(model, [(2, 10)], labels)
+
+    assert loss.item() > 0
+    loss.backward()
+    grad = model.model.beacon_embed_tokens.weight.grad
+    assert grad is not None and grad.abs().sum() > 0
+
+
+def test_per_beacon_loss_contributes_to_total():
+    """同一 intersect 布局下，只有续写权重不同 → 损失必须变大。"""
+    labels = IDS.clone()
+    labels[:, :8] = -100
+    baseline = _loss(_make_per_beacon_model(0.0), [(2, 10)], labels)
+    weighted = _loss(_make_per_beacon_model(0.5), [(2, 10)], labels)
+    assert torch.isfinite(weighted)
+    assert weighted.item() > baseline.item()
+
+
+def test_per_beacon_no_continuation_loss_on_inference():
+    model = _make_per_beacon_model(0.5)
+    memory = model.prefill_and_get_cache(IDS, regions=[(2, 10)])
+    assert memory._cont_losses == []
+    assert memory._step_cont_labels is None
+
+
+def test_describe_layout_reports_continuation_granularity():
+    """判定续写监督粒度必须反映在启动打印里，便于确认与训练一致。"""
+    per_beacon = BeaconConfig(
+        beacon_pos="intersect", beacon_window=2, beacon_stride=2, beacon_ratio=2,
+        beacon_continuation_loss_weight=0.1, beacon_continuation_per_beacon=True,
+    ).describe_layout()
+    assert "续写监督=每 beacon 1 个" in per_beacon
+
+    windowed = BeaconConfig(
+        beacon_window=4, beacon_stride=4, beacon_ratio=2,
+        beacon_continuation_loss_weight=0.1,
+    ).describe_layout()
+    assert "续写监督=每窗头 4 个" in windowed
+
+    off = BeaconConfig(beacon_window=4, beacon_stride=4, beacon_ratio=2).describe_layout()
+    assert "续写监督=关闭" in off
+
+    # intersect 布局下窗头监督根本不会产生，打印不得谎报「每窗头 N 个」
+    intersect = BeaconConfig(
+        beacon_pos="intersect", beacon_window=4, beacon_stride=4, beacon_ratio=2,
+        beacon_continuation_loss_weight=0.1,
+    ).describe_layout()
+    assert "续写监督=关闭（intersect 不产生窗头监督）" in intersect

@@ -1,5 +1,18 @@
 """Beacon 滑动窗口记忆状态机。
 
+.. deprecated::
+    这是 Qwen2 时代的旧路径（由 :class:`~search_comp.models.beacon_qwen2.BeaconQwen2ForCausalLM`
+    使用），当前训练/评测走的是 ``beacon_qwen3._Qwen3BeaconMemory``。保留仅作历史对照，
+    **本文件不随新功能更新**：
+
+    - 它没有续写损失（``beacon_continuation_*`` 只在新路径实现）；
+    - 下面第 12 行声称「intersect 的 beacon 关注当前 chunk」，但本文件的掩码与 Qwen3.5
+      路径一样是整窗普通因果掩码，窗内 beacon 实际能看到本窗更早 chunk 的原始 token
+      —— 该说法不成立；
+    - 真正想要的「后一个 chunk 只看得见前一个 chunk 的 beacon」在新路径上由
+      ``beacon_window == beacon_ratio`` 达成（隔离来自窗口边界，因为注意力掩码只作用于
+      full-attention 层，linear-attention 层是无掩码的循环扫描）。
+
 本模块实现了 Activate Beacon 的滑动窗口处理逻辑，面向 RAG / 交互式搜索场景。
 序列被划分为若干**片段（segment）**：
 

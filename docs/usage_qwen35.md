@@ -152,10 +152,57 @@ bash scripts/verify_beacon.sh
 | `beacon_attn` | `"full-coverage"` | beacon 注意力模式（仅支持 full-coverage：beacon 关注窗口内全部 token） |
 | `beacon_pos` | `"append"` | beacon 放置方式（仅支持 append：追加在窗口末尾） |
 | `beacon_embed_init` | `"eos"` | beacon 嵌入初始化来源（`eos`/`bos`） |
+| `beacon_doc_region_split` | `false` | 把每个 `<information>` 块按子文档切成多个压缩段（每篇文档一段）。续写监督的正确性依赖它 |
+| `beacon_continuation_loss_weight` | `0.0` | 续写损失权重；`0` = 关闭（逐位等价于历史行为）。见 §3.1.1 |
+| `beacon_continuation_tokens` | `4` | window 模式下每个续写窗监督的前 k 个 token；beacon 模式下不生效 |
+| `beacon_continuation_per_beacon` | `false` | 续写监督粒度：`false` = window 模式，`true` = beacon 模式（见 §3.1.1） |
+| `beacon_keep_window` | `null` | keep 段切窗上限（`null` 跟随 `beacon_window`，`0` 不切）；只影响前向次数与峰值显存，不改变结果 |
 
 > **压缩效果**：一个满窗口 `beacon_window` 个 token 末尾追加
 > `beacon_window // beacon_ratio` 个 beacon；不满窗口按 `ceil(剩余/ratio)` 生成。
 > 只压缩 `<information>` 检索文档块，其余（question/think/search/answer）为 keep。
+
+#### 3.1.1 续写监督：window 模式 vs beacon 模式
+
+续写损失只监督「左侧没有可见原文、只能靠已提交的 beacon 记忆预测下一个 token」的位置。
+粒度由 `beacon_continuation_per_beacon` 二选一：
+
+| | window 模式（默认） | beacon 模式 |
+|---|---|---|
+| 开关 | `beacon_continuation_per_beacon: false` | `beacon_continuation_per_beacon: true` |
+| 监督位置 | 每个压缩段**非首窗**窗头的前 `beacon_continuation_tokens` 个 token | 每个 chunk 边界：该 chunk 的 beacon → 下一个 chunk 的首 token |
+| 读出头 | 该窗窗头的隐状态 | 该 chunk 的 beacon 隐状态 |
+| `beacon_continuation_tokens` | 生效 | 不生效（每个 beacon 只监督 1 个 token） |
+| 参数要求 | 需 `beacon_pos: "append"`（intersect 布局不产生窗头监督） | **强制 `beacon_window == beacon_ratio`** |
+| 段尾 | 段内最后一个窗口可能监督到段外 token | 段尾窗口恒被跳过（`end < seg_end`） |
+
+> **为什么 beacon 模式强制 `beacon_window == beacon_ratio`**：chunk 隔离只能来自
+> **窗口边界**——窗末只提交 beacon、丢弃原始 K/V，于是下一个 chunk 的 token 左侧只有已
+> 提交的 beacon。改注意力掩码做不到：`attn_mask` 只作用于 full-attention 层，18 个
+> linear-attention 层是**无掩码**的循环扫描，窗内跨 chunk 的原始 token 仍会经残差流泄漏。
+> 窗口大于 ratio 时，窗内 beacon 仍能直接看见本窗更早的原文，「仅凭压缩记忆预测」不成立。
+> 代价：文档区前向次数 = 段长 / ratio（96→16 即 6 倍）；keep 段仍由 `beacon_keep_window`
+> 独立控制粒度。
+>
+> **跨子文档伪续写**：`beacon_doc_region_split: false` 时一个压缩段横跨多篇子文档，
+> 段内的窗口边界会监督「预测下一篇文档的首 token」——而下一篇是检索拼进来的，与上文无
+> 因果关系。实测（`window=4`，文本 `"Doc 1 A\n\nDoc 2 B"`，第二篇首 token 在位置 9）：
+
+| 配置 | 目标是新文档首 token 的监督点 |
+|------|------|
+| window 模式 + `doc_region_split: false` | `(窗起始 8 → 目标 9)` |
+| window 模式 + `doc_region_split: true` | `(窗起始 8 → 目标 9)` ← **仍然存在** |
+| beacon 模式 + `doc_region_split: true` | 无 |
+
+> 要完全避免：`beacon_continuation_per_beacon: true` + `beacon_window == beacon_ratio` +
+> `beacon_doc_region_split: true`。根因是 `split_document_regions` 把分隔空行 `\n\n` 划给
+> **前一篇**，于是前一篇压缩段的最后一个窗口压在换行上、目标正好是下一篇的首 token；
+> window 模式只能靠 `doc_region_split: true` 把暴露面收敛到「每个子文档段最多 1 个点」，
+> 当子文档最后一窗长度 ≤ `beacon_continuation_tokens`（约 `k/window` 比例的子文档）时仍会命中。
+>
+> 训练/评测启动时 `describe_layout()` 会打印**实际生效**的粒度，例如
+> `…；续写监督=每 beacon 1 个`。intersect 布局配 window 模式会明确打印
+> 「关闭（intersect 不产生窗头监督）」，避免出现「权重设了但其实不生效」的静默漂移。
 
 ### 3.2 训练超参数（`configs/*.yaml` 顶层）
 

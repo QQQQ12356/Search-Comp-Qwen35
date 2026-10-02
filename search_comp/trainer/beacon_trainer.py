@@ -100,7 +100,9 @@ def _sample_length_summary(dataset, sample_size: int, seed: int, beacon_window: 
         },
     }
     if beacon_window and regions:
-        # 压缩区长度 > beacon_window 才会产生第 2 个窗口，即续写监督的前提。
+        # 仅 window 模式（beacon_continuation_per_beacon=false）适用：压缩区长度 >
+        # beacon_window 才会产生第 2 个窗口，也就是续写监督的前提。beacon 模式下每个窗口
+        # 本身就是 chunk 边界，长度 >= 2 的压缩区都有监督，该比值不再反映实际覆盖。
         multi_window = sum(1 for size in regions if size > beacon_window)
         summary["compress_regions"] = {
             "count": len(regions),
