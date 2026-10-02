@@ -273,7 +273,7 @@ def test_prefill_produces_no_continuation_loss():
 # ----------------------------------------------------------------------
 # 续写损失：按 beacon 生效（intersect 布局）
 # ----------------------------------------------------------------------
-def _make_per_beacon_model(weight: float):
+def _make_per_beacon_model(weight: float, tokens: int = 1):
     """``beacon_window == beacon_ratio``（每窗一个 chunk）+ 按 beacon 监督。
 
     隔离来自窗口边界而非掩码：窗末只提交 beacon、丢弃原始 K/V，于是后续 chunk 只能
@@ -284,25 +284,31 @@ def _make_per_beacon_model(weight: float):
     model.beacon_config.beacon_window = 2
     model.beacon_config.beacon_stride = 2
     model.beacon_config.beacon_continuation_loss_weight = weight
+    model.beacon_config.beacon_continuation_tokens = tokens
     model.beacon_config.beacon_continuation_per_beacon = True
     return model.eval()
 
 
-def _supervised_beacon_targets(model, ids, regions):
-    """逐窗走状态机，返回被监督的 ``(窗起点, 目标 token 的全局位置)``。"""
+def _supervised_beacon_points(model, ids, regions):
+    """逐窗走状态机，返回 ``(窗起点, 读取的隐状态行, 目标 token 的全局位置)``。"""
     model._mem = _Qwen3BeaconMemory(model, model.beacon_config)
     model._mem.prepare(ids, ids.clone(), regions)
     position_of = {int(token): pos for pos, token in enumerate(ids[0].tolist())}
-    targets = []
+    points = []
     while not model._mem.finish:
         start = model._mem._pos
         model._mem.step()
-        labels = model._mem._step_cont_labels
+        labels, rows = model._mem._step_cont_labels, model._mem._step_cont_rows
         if labels is None:
             continue
-        for local in (labels[0] != -100).nonzero().flatten().tolist():
-            targets.append((start, position_of[int(labels[0, local])]))
-    return targets
+        for row, token in zip(rows[0].tolist(), labels[0].tolist()):
+            points.append((start, row, position_of[int(token)]))
+    return points
+
+
+def _supervised_beacon_targets(model, ids, regions):
+    """``_supervised_beacon_points`` 的简化视图：只保留 ``(窗起点, 目标全局位置)``。"""
+    return [(start, target) for start, _, target in _supervised_beacon_points(model, ids, regions)]
 
 
 def test_per_beacon_requires_window_equal_ratio():
@@ -342,6 +348,7 @@ def test_per_beacon_is_layout_agnostic_when_window_equals_ratio():
         model.beacon_config.beacon_window = 2
         model.beacon_config.beacon_stride = 2
         model.beacon_config.beacon_continuation_loss_weight = 0.5
+        model.beacon_config.beacon_continuation_tokens = 1
         model.beacon_config.beacon_continuation_per_beacon = True
         targets.append(_supervised_beacon_targets(model, IDS, [(2, 10)]))
     assert targets[0] == targets[1] == [(2, 4), (4, 6), (6, 8)]
@@ -381,6 +388,45 @@ def test_per_beacon_supervises_exactly_one_point_per_chunk():
     assert starts == sorted(set(starts)), "同一窗口产生了多个监督点"
     assert all(target == start + model.beacon_config.beacon_window
                for start, target in targets), "监督目标不是紧邻的下一窗口首 token"
+
+
+def test_per_beacon_supervises_k_tokens_per_chunk():
+    """k=2（== ratio）：每个 chunk 的 beacon 监督下一个 chunk 的全部 token。"""
+    model = _make_per_beacon_model(0.5, tokens=2)
+    assert _supervised_beacon_targets(model, IDS, [(2, 10)]) == [
+        (2, 4), (2, 5), (4, 6), (4, 7), (6, 8), (6, 9),
+    ]
+
+
+def test_per_beacon_clamps_targets_to_the_segment():
+    """k=3 > ratio：目标越过下一个 chunk，但一律钳制在 seg_end 内，不跨子文档。"""
+    model = _make_per_beacon_model(0.5, tokens=3)
+    assert _supervised_beacon_targets(model, IDS, [(2, 10)]) == [
+        (2, 4), (2, 5), (2, 6),
+        (4, 6), (4, 7), (4, 8),
+        (6, 8), (6, 9),            # 距段尾只剩 2 个 token，被截断
+    ]
+
+
+def test_per_beacon_k_targets_share_one_readout_row():
+    """k 个目标来自同一行隐状态：beacon 恒在末位（布局 [t, t, B] → 行 2）。"""
+    model = _make_per_beacon_model(0.5, tokens=2)
+    points = _supervised_beacon_points(model, IDS, [(2, 10)])
+    assert points, "应当产生监督点"
+    assert {row for _, row, _ in points} == {2}
+
+
+def test_window_mode_k_targets_read_consecutive_rows():
+    """window 模式语义不变：k 个目标分别读窗头 0..k-1 行，而不是同一行。"""
+    model = _make_model(0.5)                      # window=4/ratio=2/append，k=2
+    model._mem = _Qwen3BeaconMemory(model, model.beacon_config)
+    model._mem.prepare(IDS, IDS.clone(), [(2, 10)])
+    rows_per_window = []
+    while not model._mem.finish:
+        model._mem.step()
+        if model._mem._step_cont_rows is not None:
+            rows_per_window.append(model._mem._step_cont_rows[0].tolist())
+    assert rows_per_window == [[0, 1]]
 
 
 def test_per_beacon_weight_zero_builds_no_targets():
@@ -430,8 +476,9 @@ def test_describe_layout_reports_continuation_granularity():
     per_beacon = BeaconConfig(
         beacon_pos="intersect", beacon_window=2, beacon_stride=2, beacon_ratio=2,
         beacon_continuation_loss_weight=0.1, beacon_continuation_per_beacon=True,
+        beacon_continuation_tokens=3,
     ).describe_layout()
-    assert "续写监督=每 beacon 1 个" in per_beacon
+    assert "续写监督=每 beacon 3 个" in per_beacon
 
     windowed = BeaconConfig(
         beacon_window=4, beacon_stride=4, beacon_ratio=2,

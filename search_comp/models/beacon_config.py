@@ -58,11 +58,14 @@ class BeaconConfig:
     beacon_doc_region_split: bool = False
     #: 非首窗续写损失权重。0 表示关闭（默认，逐位等价于历史行为）。
     beacon_continuation_loss_weight: float = 0.0
-    #: 每个续写窗监督的前 k 个 token；这些位置只能依赖已提交的 beacon 记忆。
+    #: 每个读出点预测的目标 token 数 k（两种模式都生效）。window 模式 = 每窗窗头前 k 个
+    #: token，由窗头第 0..k-1 行分别预测；beacon 模式 = 每 chunk 的 beacon 预测其后 k 个
+    #: token，k 个目标共用 beacon 那一行（chunk 隔离下唯一的纯压缩读出点）。k <=
+    #: beacon_ratio 时目标正好是下一个 chunk 的前 k 个，超出则伸进更后面的 chunk。
     beacon_continuation_tokens: int = 4
     #: 续写监督的粒度：``False`` = 每个压缩段的**非首窗窗头** ``beacon_continuation_tokens``
-    #: 个 token（历史行为）；``True`` = 每个 **chunk 边界**由该 chunk 的 beacon 监督下一个
-    #: chunk 的首 token，此时 ``beacon_continuation_tokens`` 不生效。
+    #: 个 token（历史行为）；``True`` = 每个 **chunk 边界**由该 chunk 的 beacon 监督其后
+    #: ``beacon_continuation_tokens`` 个 token（目标钳制在压缩段内，不跨子文档）。
     #:
     #: 开启后强制 ``beacon_window == beacon_ratio``（每个窗口恰好一个 chunk）。隔离来自
     #: **窗口边界**而不是注意力掩码：窗末只提交 beacon、丢弃原始 K/V，后续 chunk 因此只能
@@ -182,7 +185,7 @@ class BeaconConfig:
         if self.beacon_continuation_loss_weight <= 0:
             continuation = "续写监督=关闭"
         elif self.beacon_continuation_per_beacon:
-            continuation = "续写监督=每 beacon 1 个"
+            continuation = f"续写监督=每 beacon {self.beacon_continuation_tokens} 个"
         elif self.beacon_pos == "append":
             continuation = f"续写监督=每窗头 {self.beacon_continuation_tokens} 个"
         else:

@@ -304,9 +304,10 @@ class _Qwen3BeaconMemory:
         self._question = None
         self._question_input_ids = None
         self._readout_losses = []
-        # 续写监督：全局移位的 token id、当前窗口的监督标签、跨窗口损失累积
+        # 续写监督：全局移位的 token id、当前窗口的读出位置与监督标签、跨窗口损失累积
         self._cont_losses: List[torch.Tensor] = []
         self._shifted_ids: Optional[torch.Tensor] = None
+        self._step_cont_rows: Optional[torch.Tensor] = None
         self._step_cont_labels: Optional[torch.Tensor] = None
         # 分段损失：全序列逐位置权重，以及当前窗口的切片
         self._seq_weights: Optional[torch.Tensor] = None
@@ -421,10 +422,9 @@ class _Qwen3BeaconMemory:
                 weights = weights[:, order]
         self._step_weights = weights
 
-        # 续写监督：标签在「置换 + beacon 补齐」之后构造，与送入前向的窗口逐位对齐。
-        self._step_cont_labels = self._build_cont_labels(
-            input_ids, mode, start, end, seg_start, seg_end
-        )
+        # 续写监督：读出位置与目标都在「置换 + beacon 补齐」之后按窗口局部坐标确定。
+        cont = self._build_cont_rows_labels(input_ids, mode, start, end, seg_start, seg_end)
+        self._step_cont_rows, self._step_cont_labels = cont if cont is not None else (None, None)
 
         # past：full-attn 层 4 元组
         mem_size = 0
@@ -461,60 +461,56 @@ class _Qwen3BeaconMemory:
         return input_ids, labels, attn_mask, (cos, sin), past
 
     # ------------------------------------------------------------------
-    def _build_cont_labels(self, win_ids, mode, start, end, seg_start, seg_end):
-        """构造当前窗口的续写监督标签（``(bsz, cur_len)``，非监督位置为 -100）。
+    def _build_cont_rows_labels(self, win_ids, mode, start, end, seg_start, seg_end):
+        """构造当前窗口的续写监督 ``(rows, labels)``；无监督点时返回 ``None``。
+
+        ``rows`` 与 ``labels`` 形状均为 ``(bsz, n)``：取 ``hidden`` 中 ``rows`` 指定的行
+        去预测 ``labels`` 里的目标 token。两种模式的读出点不同：
 
         - window 模式（append）：压缩段**非首窗**窗头的 ``beacon_continuation_tokens``
-          个 token。首窗窗头能看到本段更早的原始 token，故只监督非首窗；非首窗窗头左侧
-          只有已提交的 beacon，这些预测只能靠压缩记忆。开启 ``beacon_doc_region_split``
-          后压缩段即单篇子文档，非首窗等价于「同一篇文档的续写窗」。
-        - beacon 模式：每个 chunk 的 beacon 监督下一个 chunk 的首 token，要求
-          ``beacon_window == beacon_ratio``（见 :meth:`_per_beacon_cont_labels`）。
+          个 token，分别由窗头第 ``0..k-1`` 行的隐状态预测。首窗窗头能看到本段更早的
+          原始 token，故只监督非首窗；非首窗窗头左侧只有已提交的 beacon，预测只能靠
+          压缩记忆。开启 ``beacon_doc_region_split`` 后压缩段即单篇子文档，非首窗等价于
+          「同一篇文档的续写窗」。
+        - beacon 模式：每个 chunk 的 beacon 监督其后 ``k`` 个 token，``k`` 个目标**共用**
+          beacon 那一行的隐状态（见 :meth:`_per_beacon_cont_rows_labels`）。
         """
         if (mode != "compress"
                 or self.beacon.beacon_continuation_loss_weight <= 0
                 or self._shifted_ids is None):
             return None
         if self.beacon.beacon_continuation_per_beacon:
-            labels = self._per_beacon_cont_labels(win_ids, end, seg_end)
-        elif self.beacon.beacon_pos == "append" and start > seg_start:
-            stop = min(start + self.beacon.beacon_continuation_tokens, end)
-            labels = None
-            if stop > start:
-                labels = win_ids.new_full(win_ids.shape, -100)
-                labels[:, : stop - start] = self._shifted_ids[:, start:stop]
-        else:
-            labels = None
-        if labels is None or not bool((labels != -100).any()):
+            return self._per_beacon_cont_rows_labels(win_ids, end, seg_end)
+        if self.beacon.beacon_pos != "append" or start <= seg_start:
             return None
-        return labels
+        stop = min(start + self.beacon.beacon_continuation_tokens, end)
+        if stop <= start:
+            return None
+        rows = torch.arange(stop - start, device=self._device).expand(win_ids.shape[0], -1)
+        return rows, self._shifted_ids[:, start:stop]
 
-    def _per_beacon_cont_labels(self, win_ids, end, seg_end):
-        """每个 chunk 的 beacon 监督下一个 chunk 的首 token。
+    def _per_beacon_cont_rows_labels(self, win_ids, end, seg_end):
+        """每个 chunk 的 beacon 监督其后 ``k`` 个 token，共用 beacon 那一行的隐状态。
 
-        要求 ``beacon_window == beacon_ratio``：窗末只提交 beacon 并丢弃原始 K/V，
-        于是下一个 chunk 的 token 左侧只有已提交的 beacon，预测只能靠压缩记忆。这一隔离
-        来自窗口边界而非注意力掩码 —— 掩码只作用于 full-attention 层，linear-attention
-        层是无掩码的循环扫描，窗内跨 chunk 的原始 token 会经残差流泄漏。
+        要求 ``beacon_window == beacon_ratio``（校验强制）：每个压缩窗有且仅有一个 beacon
+        且位于窗口末位，因此读出点恒为最后一行。窗末只提交 beacon 并丢弃原始 K/V，于是
+        后续 token 左侧只有已提交的 beacon，预测只能靠压缩记忆。这一隔离来自窗口边界而非
+        注意力掩码 —— 掩码只作用于 full-attention 层，linear-attention 层是无掩码的循环
+        扫描，窗内跨 chunk 的原始 token 会经残差流泄漏。
 
-        窗尾 beacon 之后是下一窗首 token，只有下一窗仍属同一压缩段时才监督；跨段
-        （进入 keep 或下一篇子文档）不监督，避免制造伪续写。注意「压缩段 == 子文档」
-        成立的前提是 ``beacon_doc_region_split=True``。
+        目标一律钳制在 ``seg_end`` 内，跨段（进入 keep 或下一篇子文档）不监督，因此不会
+        制造伪续写。注意「压缩段 == 子文档」成立的前提是 ``beacon_doc_region_split=True``；
+        ``k <= beacon_ratio`` 时目标正好是下一个 chunk 的前 k 个 token，超出则伸进更后面的
+        chunk（仍在同一压缩段内）。
         """
-        labels = win_ids.new_full(win_ids.shape, -100)
         is_beacon = self._step_beacon_indices
-        if is_beacon is None or win_ids.shape[1] < 2:
-            return labels
-        is_beacon = is_beacon.bool()
-        # 局部位置 i 的 beacon 监督 i+1；i+1 须是窗口内的真实 token。``beacon_intersect_order``
-        # 不会产生相邻 beacon，所以下面这一支在 window == ratio（校验强制）下恒为空集，
-        # 实际只有尾部 beacon 那一支生效；保留通用形式是为了放宽校验后仍然正确。
-        followed = is_beacon[:-1] & ~is_beacon[1:]
-        target_pos = followed.nonzero(as_tuple=True)[0] + 1
-        labels[:, target_pos - 1] = win_ids[:, target_pos]
-        if bool(is_beacon[-1].item()) and end < seg_end:
-            labels[:, -1] = self._input_ids[:, end]
-        return labels
+        if is_beacon is None or not bool(is_beacon[-1].item()):
+            return None
+        stop = min(end + self.beacon.beacon_continuation_tokens, seg_end)
+        if stop <= end:
+            return None
+        rows = win_ids.new_full((win_ids.shape[0], stop - end), win_ids.shape[1] - 1)
+        return rows, self._input_ids[:, end:stop]
 
     # ------------------------------------------------------------------
     def update_memory(self, new_past):
@@ -753,14 +749,17 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
                     hidden, win_labels, valid_num, self._mem._step_weights
                 )
                 self._mem.update_loss(batch_loss, weight_sum)
-            # 续写损失：独立项（不进主 CE）。decode 路径 win_labels 为 None，
-            # 因此不会读到 prefill 遗留的 _step_cont_labels。
+            # 续写损失：独立项（不进主 CE），读出点由 _step_cont_rows 指定（beacon 模式下
+            # k 个目标共用 beacon 那一行）。decode 路径 win_labels 为 None，因此不会读到
+            # prefill 遗留的 _step_cont_labels。
             cont_labels = self._mem._step_cont_labels
             if cont_labels is not None:
+                cont_hidden = hidden.gather(
+                    1, self._mem._step_cont_rows.unsqueeze(-1).expand(-1, -1, hidden.shape[-1])
+                )
                 cont_valid = (cont_labels != -100).sum(-1)
-                if cont_valid.sum().item() > 0:
-                    cont_loss, _ = self._sparse_window_loss(hidden, cont_labels, cont_valid, None)
-                    self._mem._cont_losses.append(cont_loss.mean())
+                cont_loss, _ = self._sparse_window_loss(cont_hidden, cont_labels, cont_valid, None)
+                self._mem._cont_losses.append(cont_loss.mean())
         elif last_logits_only:
             logits = self.lm_head(hidden[:, -1:, :]).float()
         else:

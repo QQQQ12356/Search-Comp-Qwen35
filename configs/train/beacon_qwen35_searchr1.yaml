@@ -68,10 +68,10 @@ beacon:
   beacon_doc_region_split: true
   beacon_continuation_loss_weight: 0.1
   beacon_continuation_tokens: 4
-  # 续写监督粒度二选一：
-  #   false（当前）= 上面那套：子文档**非首窗**窗头监督 beacon_continuation_tokens 个 token；
-  #   true  = 每个 chunk 边界由该 chunk 的 beacon 监督下一个 chunk 的首 token，
-  #           beacon_continuation_tokens 随之失效，并**强制** beacon_window == beacon_ratio。
+  # 续写监督粒度二选一（beacon_continuation_tokens = 每个读出点预测的目标数 k）：
+  #   false（当前）= 子文档**非首窗**窗头监督前 k 个 token，k 个目标各读窗头一行隐状态；
+  #   true  = 每个 chunk 的 beacon 监督其后 k 个 token，k 个目标**共用** beacon 那一行，
+  #           并**强制** beacon_window == beacon_ratio。目标恒钳制在压缩段内（不跨子文档）。
   # 为什么必须 window == ratio：chunk 隔离来自**窗口边界**（窗末只提交 beacon、丢弃原始
   # K/V），而不是注意力掩码 —— 掩码只作用于 full-attention 层，18 个 linear-attention 层
   # 是无掩码的循环扫描，窗内跨 chunk 的原始 token 会经残差流泄漏。window > ratio 时窗内

@@ -154,7 +154,7 @@ bash scripts/verify_beacon.sh
 | `beacon_embed_init` | `"eos"` | beacon 嵌入初始化来源（`eos`/`bos`） |
 | `beacon_doc_region_split` | `false` | 把每个 `<information>` 块按子文档切成多个压缩段（每篇文档一段）。续写监督的正确性依赖它 |
 | `beacon_continuation_loss_weight` | `0.0` | 续写损失权重；`0` = 关闭（逐位等价于历史行为）。见 §3.1.1 |
-| `beacon_continuation_tokens` | `4` | window 模式下每个续写窗监督的前 k 个 token；beacon 模式下不生效 |
+| `beacon_continuation_tokens` | `4` | 每个读出点预测的目标 token 数 k（两种模式都生效，见 §3.1.1） |
 | `beacon_continuation_per_beacon` | `false` | 续写监督粒度：`false` = window 模式，`true` = beacon 模式（见 §3.1.1） |
 | `beacon_keep_window` | `null` | keep 段切窗上限（`null` 跟随 `beacon_window`，`0` 不切）；只影响前向次数与峰值显存，不改变结果 |
 
@@ -170,11 +170,17 @@ bash scripts/verify_beacon.sh
 | | window 模式（默认） | beacon 模式 |
 |---|---|---|
 | 开关 | `beacon_continuation_per_beacon: false` | `beacon_continuation_per_beacon: true` |
-| 监督位置 | 每个压缩段**非首窗**窗头的前 `beacon_continuation_tokens` 个 token | 每个 chunk 边界：该 chunk 的 beacon → 下一个 chunk 的首 token |
-| 读出头 | 该窗窗头的隐状态 | 该 chunk 的 beacon 隐状态 |
-| `beacon_continuation_tokens` | 生效 | 不生效（每个 beacon 只监督 1 个 token） |
+| 监督位置 | 每个压缩段**非首窗**窗头的前 k 个 token | 每个 chunk 边界：该 chunk 的 beacon → 其后 k 个 token |
+| 读出头 | 窗头第 `0..k-1` 行隐状态（k 个目标各读一行） | 该 chunk 的 beacon 隐状态（k 个目标**共用一行**） |
 | 参数要求 | 需 `beacon_pos: "append"`（intersect 布局不产生窗头监督） | **强制 `beacon_window == beacon_ratio`** |
-| 段尾 | 段内最后一个窗口可能监督到段外 token | 段尾窗口恒被跳过（`end < seg_end`） |
+| 段尾 | 段内最后一个窗口可能监督到段外 token | 目标钳制在 `seg_end` 内，永不跨段 |
+
+> `beacon_continuation_tokens`（默认 4）在两种模式下都生效，但含义不同：window 模式的 k
+> 个目标来自 k 个**不同**位置的隐状态；beacon 模式下 chunk 隔离后唯一「没有可见原文」的
+> 读出点只有 beacon 自己，所以 k 个目标必须由**同一个**向量预测（类似多 token 预测的辅助
+> 头）。`k <= beacon_ratio` 时目标正好是下一个 chunk 的 k 个 token；k 更大则伸进更后面的
+> chunk（仍在同一压缩段内）。注意默认值 4 意味着 beacon 模式下每个 beacon 要预测 4 个
+> token，只想要「每个 chunk 边界 1 个 token」就显式设 `beacon_continuation_tokens: 1`。
 
 > **为什么 beacon 模式强制 `beacon_window == beacon_ratio`**：chunk 隔离只能来自
 > **窗口边界**——窗末只提交 beacon、丢弃原始 K/V，于是下一个 chunk 的 token 左侧只有已
@@ -199,6 +205,7 @@ bash scripts/verify_beacon.sh
 > **前一篇**，于是前一篇压缩段的最后一个窗口压在换行上、目标正好是下一篇的首 token；
 > window 模式只能靠 `doc_region_split: true` 把暴露面收敛到「每个子文档段最多 1 个点」，
 > 当子文档最后一窗长度 ≤ `beacon_continuation_tokens`（约 `k/window` 比例的子文档）时仍会命中。
+> k 只改变监督点数量，不改变这个性质：beacon 模式的目标恒被钳制在 `seg_end` 内，k 再大也不会跨段。
 >
 > 训练/评测启动时 `describe_layout()` 会打印**实际生效**的粒度，例如
 > `…；续写监督=每 beacon 1 个`。intersect 布局配 window 模式会明确打印
