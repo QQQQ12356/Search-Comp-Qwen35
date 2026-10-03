@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 import torch
-from transformers import Trainer, TrainerCallback, TrainingArguments
+from transformers import TrainerCallback, TrainingArguments
 
 from ..data.interactive_dataset import InteractiveCollator, InteractiveSFTDataset
 from ..models.beacon_config import BeaconConfig
@@ -40,6 +40,7 @@ from ..utils.runtime import (
     write_json,
 )
 from ..utils.trainer_callbacks import JsonlMetricsCallback
+from .loss_component_trainer import LossComponentTrainer
 
 
 def _cuda_memory_snapshot() -> dict:
@@ -313,12 +314,14 @@ def main_train(
         run_name=cfg["exp_name"],
     )
 
-    trainer = Trainer(
+    trainer = LossComponentTrainer(
         model=model,
         args=args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         data_collator=collator,
+        # 每个 log_step 的损失行会额外打印 ce_loss / cont_loss / readout_loss
+        # （超类只是 Trainer 的子类，其余行为不变）。
         callbacks=[
             _SaveBeaconCheckpoints(exp_dir, save_freq, model, tokenizer, use_lora, max_train_steps),
             JsonlMetricsCallback(exp_dir),
