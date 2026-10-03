@@ -233,6 +233,11 @@ Beacon 训练同样使用标准 `transformers.Trainer` 负责 dataloader、梯�
 | `beacon_cpu_offload_activations` | 将保存激活卸载到 CPU | 仅显存不足时开启 |
 | `beacon_cpu_offload_threshold` | 仅对达到该长度的样本 offload | 24GB + 2B Search-R1 建议 2048 |
 
+Beacon 训练每个 `logging_steps` 打印的损失行会同时给出复合损失的各个组成分量：
+`ce_loss`（主交叉熵，已含片段权重）、`cont_loss`（续写损失）、`readout_loss`
+（读出蒸馏损失），三者之和即 `loss`；未启用的项恒为 `0`。分量按 log 窗口对
+micro-batch 取均值，同样写入 `trainer_metrics.jsonl` 与 `trainer_state_summary.json`。
+
 训练结束时脚本会在独立进程中把 LoRA 与 Beacon 参数合并为 `final` checkpoint。
 合并默认使用 CPU，不需要为合并过程预留一份完整的 GPU 模型显存；若只需要
 adapter，可直接使用 `final_adapter`，跳过合并阶段。
