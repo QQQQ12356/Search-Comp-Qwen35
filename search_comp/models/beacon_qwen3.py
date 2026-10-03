@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -581,10 +581,6 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
                 )
         self.post_init()
         self._init_beacon_params()
-        #: 最近一次前向的复合损失分量（``ce_loss`` / ``cont_loss`` / ``readout_loss``），
-        #: 已 detach，供 :class:`~search_comp.trainer.loss_component_trainer.LossComponentTrainer`
-        #: 在 log_step 打印。不参与求导，也不触发 GPU 同步。
-        self._last_loss_parts: Dict[str, torch.Tensor] = {}
 
     def _init_beacon_params(self):
         cfg = self.config
@@ -909,21 +905,13 @@ class BeaconQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         loss = self._mem.output()
         if loss is None:
             loss = self.model.beacon_embed_tokens.weight.sum() * 0.0
-        # 逐项留痕再求和：数值与直接累加逐位一致，但每个分量都能被日志读出。
-        zero = loss.detach() * 0.0
-        loss_parts = {"ce_loss": loss, "cont_loss": zero, "readout_loss": zero}
         if self._mem._readout_losses:
-            readout = self.beacon_config.beacon_readout_distill_weight * torch.stack(self._mem._readout_losses).mean()
+            loss = loss + self.beacon_config.beacon_readout_distill_weight * torch.stack(self._mem._readout_losses).mean()
             self._mem._readout_losses = []
-            loss = loss + readout
-            loss_parts["readout_loss"] = readout
         if self._mem._cont_losses:
-            continuation = self.beacon_config.beacon_continuation_loss_weight * \
+            loss = loss + self.beacon_config.beacon_continuation_loss_weight * \
                 torch.stack(self._mem._cont_losses).mean()
             self._mem._cont_losses = []
-            loss = loss + continuation
-            loss_parts["cont_loss"] = continuation
-        self._last_loss_parts = {name: value.detach() for name, value in loss_parts.items()}
         return loss, last_logits
 
     # ------------------------------------------------------------------
